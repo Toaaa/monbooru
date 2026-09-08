@@ -10,7 +10,7 @@ import (
 // callback receives a backing-array view, so any retained reference
 // (e.g. via append) must be copied. Used by query loops that batch IN
 // clauses below SQLite's parameter cap; the per-chunk progress / job
-// cancellation hook lives in the web-package chunkedJob.
+// cancellation hook is jobs.Chunked.
 func Chunked[T any](xs []T, chunkSize int, fn func(chunk []T) error) error {
 	for start := 0; start < len(xs); start += chunkSize {
 		if err := fn(xs[start:min(start+chunkSize, len(xs))]); err != nil {
@@ -105,6 +105,12 @@ type Querier interface {
 // decides whether the writes land on the pool or inside its transaction.
 type Execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// RowQuerier is the single-row read surface both *sql.DB and *sql.Tx
+// satisfy.
+type RowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 // CtxQuerier is Querier's context-carrying twin.

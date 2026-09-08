@@ -29,6 +29,7 @@ import (
 	"github.com/monbooru/monbooru/internal/lookup"
 	"github.com/monbooru/monbooru/internal/markup"
 	"github.com/monbooru/monbooru/internal/models"
+	"github.com/monbooru/monbooru/internal/relations"
 	"github.com/monbooru/monbooru/internal/search"
 	"github.com/monbooru/monbooru/internal/tagger"
 	"github.com/monbooru/monbooru/internal/tags"
@@ -47,9 +48,7 @@ func linkParentRelations(g Gallery, imageID int64, url, parentURL string) {
 	}
 	if parentURL != "" {
 		if parentID, ok := gallery.ImageIDBySourceURL(g.DB, parentURL); ok && parentID != imageID {
-			if err := g.RelationsSvc.AddDerivativeEdge(parentID, imageID); err != nil {
-				logx.Debugf("api: parent link %d -> %d skipped: %v", parentID, imageID, err)
-			}
+			linkFirstSource(g, parentID, imageID)
 		}
 	}
 	if url == "" {
@@ -64,9 +63,26 @@ func linkParentRelations(g Gallery, imageID int64, url, parentURL string) {
 		if child == imageID {
 			continue
 		}
-		if err := g.RelationsSvc.AddDerivativeEdge(imageID, child); err != nil {
-			logx.Debugf("api: child link %d -> %d skipped: %v", imageID, child, err)
-		}
+		linkFirstSource(g, imageID, child)
+	}
+}
+
+// linkFirstSource declares the booru parent/child edge only while the
+// derivative names no source. A post declares one parent, and an image
+// can hold several sources, so without the guard an unattended fetch
+// would stack its claim on top of whatever the operator declared by
+// hand.
+func linkFirstSource(g Gallery, source, derivative int64) {
+	has, err := relations.HasDerivativeSource(g.DB, derivative)
+	if err != nil {
+		logx.Debugf("api: parent link %d -> %d skipped: %v", source, derivative, err)
+		return
+	}
+	if has {
+		return
+	}
+	if err := g.RelationsSvc.AddDerivativeEdge(source, derivative); err != nil {
+		logx.Debugf("api: parent link %d -> %d skipped: %v", source, derivative, err)
 	}
 }
 
@@ -94,21 +110,26 @@ func (h *Handler) enrichImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Tags       []string         `json:"tags"`
-		Source     string           `json:"source"`
-		PostID     string           `json:"post_id"`
-		URL        string           `json:"url"`
-		SourceMD5  string           `json:"source_md5"`
-		ParentURL  string           `json:"parent_url"`
-		Verify     bool             `json:"verify"`
-		PostWidth  int              `json:"post_width"`
-		PostHeight int              `json:"post_height"`
-		PostSize   int64            `json:"post_size"`
-		PostExt    string           `json:"post_ext"`
-		Similarity float64          `json:"similarity"`
-		Commentary string           `json:"commentary"`
-		Original   string           `json:"original"`
-		Notes      []annotationJSON `json:"notes"`
+		Tags       []string `json:"tags"`
+		Source     string   `json:"source"`
+		PostID     string   `json:"post_id"`
+		URL        string   `json:"url"`
+		SourceMD5  string   `json:"source_md5"`
+		ParentURL  string   `json:"parent_url"`
+		Verify     bool     `json:"verify"`
+		PostWidth  int      `json:"post_width"`
+		PostHeight int      `json:"post_height"`
+		PostSize   int64    `json:"post_size"`
+		PostExt    string   `json:"post_ext"`
+		Similarity float64  `json:"similarity"`
+		Commentary string   `json:"commentary"`
+		Translated string   `json:"commentary_translated"`
+		// The source's own DText, converted on the way in and preferred over
+		// the plain rendering beside it. Mirrors a note's body_html.
+		CommentaryDText string           `json:"commentary_dtext"`
+		TranslatedDText string           `json:"commentary_translated_dtext"`
+		Original        string           `json:"original"`
+		Notes           []annotationJSON `json:"notes"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -116,7 +137,13 @@ func (h *Handler) enrichImage(w http.ResponseWriter, r *http.Request) {
 	if err := validateMaxLen("commentary", strings.TrimSpace(body.Commentary), maxImageCommentaryLen); badRequest(w, err) {
 		return
 	}
+	if err := validateMaxLen("commentary_translated", strings.TrimSpace(body.Translated), maxImageCommentaryLen); badRequest(w, err) {
+		return
+	}
 	if err := validateMaxLen("original", strings.TrimSpace(body.Original), maxImageOriginalLen); badRequest(w, err) {
+		return
+	}
+	if !checkCommentaryDText(w, body.CommentaryDText, body.TranslatedDText) {
 		return
 	}
 	sourceMD5 := strings.TrimSpace(body.SourceMD5)
@@ -208,7 +235,10 @@ func (h *Handler) enrichImage(w http.ResponseWriter, r *http.Request) {
 	// source, so a refetch pulls them in alongside the tags. Both replace what
 	// the source last carried; an empty payload leaves the stored value be.
 	if step, err := gallery.ApplySourceProvenance(g.DB, id, source, postID,
-		strings.TrimSpace(body.Commentary), strings.TrimSpace(body.Original), annotationsFromInput(body.Notes, strings.TrimSpace(body.URL))); err != nil {
+		commentaryFromInput(body.Commentary, body.CommentaryDText),
+		commentaryFromInput(body.Translated, body.TranslatedDText),
+		strings.TrimSpace(body.Original),
+		annotationsFromInput(body.Notes, strings.TrimSpace(body.URL))); err != nil {
 		g.recordFetch(id, "error", "fetch failed while applying "+step)
 		apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -223,7 +253,7 @@ func (h *Handler) enrichImage(w http.ResponseWriter, r *http.Request) {
 	if len(tagWarnings) > 0 {
 		resp["tag_warnings"] = tagWarnings
 	}
-	writeJSON(w, http.StatusOK, resp)
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 // fetchSummary is the operator-facing confirmation a source refetch surfaces
@@ -267,7 +297,7 @@ func (h *Handler) fetchStatusReport(w http.ResponseWriter, r *http.Request) {
 	}
 	g.recordFetch(id, body.State, body.Message)
 	recordLookupTerminal(g, id, body.State)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // recordLookupHit concludes an in-flight attempt on the backend the enrich's
@@ -336,7 +366,7 @@ func (h *Handler) replaceImageFile(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "invalid_request", "multipart body required")
 		return
 	}
-	if maxBytes := int64(h.cfg.Gallery.MaxFileSizeMB) * 1024 * 1024; maxBytes > 0 {
+	if maxBytes := int64(h.cfg().Gallery.MaxFileSizeMB) * 1024 * 1024; maxBytes > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes+4096)
 	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -362,6 +392,7 @@ func (h *Handler) replaceImageFile(w http.ResponseWriter, r *http.Request) {
 	claimedMD5 := strings.TrimSpace(r.FormValue("md5"))
 	parentURL := strings.TrimSpace(r.FormValue("parent_url"))
 	commentary := strings.TrimSpace(r.FormValue("commentary"))
+	translated := strings.TrimSpace(r.FormValue("commentary_translated"))
 	original := strings.TrimSpace(r.FormValue("original"))
 	notes := parseNotesField(r.FormValue("notes"), url)
 	var tags []string
@@ -371,7 +402,7 @@ func (h *Handler) replaceImageFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := validateCreateProvenance(source, postID, url, claimedMD5, parentURL, "", commentary, original, "", nil); err != nil {
+	if err := validateCreateProvenance(source, postID, url, claimedMD5, parentURL, "", commentary, translated, original, "", nil); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -405,7 +436,7 @@ func (h *Handler) replaceImageFile(w http.ResponseWriter, r *http.Request) {
 			return sum, nil, false
 		}
 		linkParentRelations(g, id, url, parentURL)
-		if step, err := gallery.ApplySourceProvenance(g.DB, id, source, postID, commentary, original, notes); err != nil {
+		if step, err := gallery.ApplySourceProvenance(g.DB, id, source, postID, commentary, translated, original, notes); err != nil {
 			g.recordFetch(id, "error", "replace failed while applying "+step)
 			apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return sum, tagWarnings, false
@@ -439,7 +470,7 @@ func (h *Handler) replaceImageFile(w http.ResponseWriter, r *http.Request) {
 		if len(tagWarnings) > 0 {
 			resp["tag_warnings"] = tagWarnings
 		}
-		writeJSON(w, http.StatusOK, resp)
+		WriteJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -534,7 +565,7 @@ func (h *Handler) replaceImageFile(w http.ResponseWriter, r *http.Request) {
 	if len(tagWarnings) > 0 {
 		resp["tag_warnings"] = tagWarnings
 	}
-	writeJSON(w, http.StatusOK, resp)
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 // dimsLabel renders WxH for the replace summary, tolerating rows whose
@@ -602,7 +633,8 @@ func (h *Handler) buildImageResponse(g Gallery, imageID int64) (*imageResponse, 
 		logx.Warnf("buildImageResponse sources: %v", err)
 	} else {
 		for _, s := range srcs {
-			resp.Sources = append(resp.Sources, sourceJSON{Site: s.Site, PostID: s.PostID, URL: s.URL, Commentary: s.Commentary, Original: s.Original, Similarity: s.Similarity})
+			resp.Sources = append(resp.Sources, sourceJSON{Site: s.Site, PostID: s.PostID, URL: s.URL, Commentary: s.Commentary,
+				CommentaryTranslated: s.CommentaryTranslated, Original: s.Original, Similarity: s.Similarity})
 		}
 	}
 	if anns, err := gallery.AnnotationsForImage(g.DB, imageID); err != nil {
@@ -663,7 +695,7 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 // patchImage handles PATCH /api/v1/images/{id}: edits the operator-
@@ -833,7 +865,7 @@ func (h *Handler) patchImage(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 // atoiOrZero reads a non-negative integer form value, treating anything
@@ -847,11 +879,23 @@ func atoiOrZero(v string) int {
 	return n
 }
 
+// checkCommentaryDText answers the 400 an oversized DText pair gets. The
+// converted values cannot carry the check: their cap is applied to output.
+func checkCommentaryDText(w http.ResponseWriter, dtext, translatedDText string) bool {
+	if err := validateMaxLen("commentary_dtext", dtext, maxImageCommentaryDTextLen); badRequest(w, err) {
+		return false
+	}
+	if err := validateMaxLen("commentary_translated_dtext", translatedDText, maxImageCommentaryDTextLen); badRequest(w, err) {
+		return false
+	}
+	return true
+}
+
 // checkCreateProvenance runs the provenance validation both create paths
-// end on and answers its 400. The ten-argument call is spelled once.
+// end on and answers its 400, so the long argument list is spelled once.
 func checkCreateProvenance(w http.ResponseWriter, in createInput) bool {
 	if err := validateCreateProvenance(in.source, in.postID, in.url, in.md5, in.parentURL,
-		in.collection, in.commentary, in.original, in.postFile.Ext, in.collectionOrder); err != nil {
+		in.collection, in.commentary, in.translated, in.original, in.postFile.Ext, in.collectionOrder); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return false
 	}
@@ -886,6 +930,7 @@ type createInput struct {
 	postFile        gallery.PostFile    // what the post says its file is; recorded on the origin row beside the md5
 	parentURL       string              // canonical URL of the post's declared parent; recorded on the origin row and linked as a derivative edge when present
 	commentary      string              // artist commentary for the pushed source; folded in on create/merge
+	translated      string              // translation of that commentary where the source published one
 	original        string              // upstream artist source the post declared; folded in on create/merge
 	notes           []models.Annotation // positional note boxes for the pushed source
 	collection      string              // collection label (images.series); set on the new row when non-empty
@@ -900,7 +945,7 @@ type createInput struct {
 // already written.
 func (h *Handler) parseCreateMultipart(w http.ResponseWriter, r *http.Request, g Gallery) (createInput, bool) {
 	var in createInput
-	maxBytes := int64(h.cfg.Gallery.MaxFileSizeMB) * 1024 * 1024
+	maxBytes := int64(h.cfg().Gallery.MaxFileSizeMB) * 1024 * 1024
 	// MaxFileSizeMB <= 0 disables the per-file cap (the watcher, Sync and the
 	// web upload treat it the same); skip MaxBytesReader so a bare 4 KiB body
 	// cap doesn't reject every push. createImage enforces the real limit when
@@ -937,7 +982,11 @@ func (h *Handler) parseCreateMultipart(w http.ResponseWriter, r *http.Request, g
 		int64(atoiOrZero(r.FormValue("post_size"))),
 		r.FormValue("post_ext"))
 	in.parentURL = strings.TrimSpace(r.FormValue("parent_url"))
-	in.commentary = strings.TrimSpace(r.FormValue("commentary"))
+	if !checkCommentaryDText(w, r.FormValue("commentary_dtext"), r.FormValue("commentary_translated_dtext")) {
+		return in, false
+	}
+	in.commentary = commentaryFromInput(r.FormValue("commentary"), r.FormValue("commentary_dtext"))
+	in.translated = commentaryFromInput(r.FormValue("commentary_translated"), r.FormValue("commentary_translated_dtext"))
 	in.original = strings.TrimSpace(r.FormValue("original"))
 	in.notes = parseNotesField(r.FormValue("notes"), in.url)
 	if tagsJSON := r.FormValue("tags"); tagsJSON != "" {
@@ -1015,6 +1064,9 @@ func (h *Handler) parseCreateJSON(w http.ResponseWriter, r *http.Request, g Gall
 		MD5             string           `json:"md5"`
 		ParentURL       string           `json:"parent_url"`
 		Commentary      string           `json:"commentary"`
+		Translated      string           `json:"commentary_translated"`
+		CommentaryDText string           `json:"commentary_dtext"`
+		TranslatedDText string           `json:"commentary_translated_dtext"`
 		Original        string           `json:"original"`
 		Notes           []annotationJSON `json:"notes"`
 		Collection      string           `json:"collection"`
@@ -1047,7 +1099,11 @@ func (h *Handler) parseCreateJSON(w http.ResponseWriter, r *http.Request, g Gall
 	in.md5 = strings.TrimSpace(body.MD5)
 	in.postFile = postFileFrom(body.PostWidth, body.PostHeight, body.PostSize, body.PostExt)
 	in.parentURL = strings.TrimSpace(body.ParentURL)
-	in.commentary = strings.TrimSpace(body.Commentary)
+	if !checkCommentaryDText(w, body.CommentaryDText, body.TranslatedDText) {
+		return in, false
+	}
+	in.commentary = commentaryFromInput(body.Commentary, body.CommentaryDText)
+	in.translated = commentaryFromInput(body.Translated, body.TranslatedDText)
 	in.original = strings.TrimSpace(body.Original)
 	in.notes = annotationsFromInput(body.Notes, in.url)
 	in.collection = strings.TrimSpace(body.Collection)
@@ -1129,7 +1185,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 	// Enforce gallery.max_file_size_mb for both modes. Multipart also
 	// has MaxBytesReader; this mainly guards the JSON path-reference
 	// mode where the caller supplies an absolute path.
-	if maxMB := h.cfg.Gallery.MaxFileSizeMB; maxMB > 0 {
+	if maxMB := h.cfg().Gallery.MaxFileSizeMB; maxMB > 0 {
 		if info, err := os.Stat(in.imgPath); err == nil {
 			if info.Size() > int64(maxMB)*1024*1024 {
 				if in.uploadedToDisk {
@@ -1213,7 +1269,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		linkParentRelations(g, img.ID, in.url, in.parentURL)
-		if step, err := gallery.ApplySourceProvenance(g.DB, img.ID, in.source, in.postID, in.commentary, in.original, in.notes); err != nil {
+		if step, err := gallery.ApplySourceProvenance(g.DB, img.ID, in.source, in.postID, in.commentary, in.translated, in.original, in.notes); err != nil {
 			logx.Warnf("api createImage %s: %v", step, err)
 			apiError(w, http.StatusInternalServerError, "internal_error", "duplicate detected but the merge failed: "+err.Error())
 			return
@@ -1241,7 +1297,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		if len(tagWarnings) > 0 {
 			envelope["tag_warnings"] = tagWarnings
 		}
-		writeJSON(w, http.StatusOK, envelope)
+		WriteJSON(w, http.StatusOK, envelope)
 		return
 	}
 
@@ -1251,7 +1307,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 
 	// A freshly-created row records its provenance directly; the duplicate
 	// path above merges instead.
-	if err := gallery.ApplyCreateProvenance(g.DB, img.ID, in.source, in.postID, in.url, in.md5, in.parentURL, in.collection, in.commentary, in.original, in.postFile, in.collectionOrder); err != nil {
+	if err := gallery.ApplyCreateProvenance(g.DB, img.ID, in.source, in.postID, in.url, in.md5, in.parentURL, in.collection, in.commentary, in.translated, in.original, in.postFile, in.collectionOrder); err != nil {
 		logx.Warnf("api createImage provenance: %v", err)
 		apiError(w, http.StatusInternalServerError, "internal_error", "failed to set provenance fields")
 		return
@@ -1273,7 +1329,8 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 
 	var autotagNote string
 	if in.autotag {
-		if !tagger.IsAvailable(h.cfg) {
+		cfg := h.cfg()
+		if !tagger.IsAvailable(cfg) {
 			autotagNote = "autotag skipped: tagger not available"
 		} else {
 			selected, selErr := h.selectedTaggers(g.Name, in.taggerName)
@@ -1287,7 +1344,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 				invalidate := g.InvalidateCaches
 				mangaCache := gallery.MangaCacheDir(g.ThumbnailsPath)
 				go func() {
-					skipped, err := tagger.RunWithTaggers(h.jobs.Context(), database, h.cfg, []int64{imgID}, selected, h.jobs, h.cfg.Tagger.ExecutionProvider, mangaCache)
+					skipped, err := tagger.RunWithTaggers(h.jobs.Context(), database, cfg, []int64{imgID}, selected, h.jobs, cfg.Tagger.ExecutionProvider, mangaCache)
 					if invalidate != nil {
 						invalidate()
 					}
@@ -1321,17 +1378,17 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		if autotagNote != "" {
 			envelope["autotag"] = autotagNote
 		}
-		writeJSON(w, http.StatusCreated, envelope)
+		WriteJSON(w, http.StatusCreated, envelope)
 		return
 	}
-	writeJSON(w, http.StatusCreated, resp)
+	WriteJSON(w, http.StatusCreated, resp)
 }
 
 // selectedTaggers resolves a caller-supplied tagger_name to a concrete
 // list of taggers running on the named gallery. Empty name means every
 // tagger enabled + available + applicable to that gallery.
 func (h *Handler) selectedTaggers(gallery, name string) ([]tagger.TaggerStatus, error) {
-	enabled := tagger.EnabledTaggersForGallery(h.cfg, gallery)
+	enabled := tagger.EnabledTaggersForGallery(h.cfg(), gallery)
 	if name == "" {
 		return enabled, nil
 	}
@@ -1397,7 +1454,7 @@ func (h *Handler) deleteImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if folderRemoved {
-		writeJSON(w, http.StatusOK, map[string]any{
+		WriteJSON(w, http.StatusOK, map[string]any{
 			"folder_deleted": true,
 			"folder":         result.FolderPath,
 		})
@@ -1419,7 +1476,7 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 	orderStr := q.Get("order")
 	orderStr = cmp.Or(orderStr, search.DefaultOrder(sortStr))
 
-	offset, limit := parsePage(r, h.cfg.UI.PageSize, 200)
+	offset, limit := parsePage(r, h.cfg().UI.PageSize, 200)
 	pageNum := offset/limit + 1
 
 	expr, parseErr := search.Parse(queryStr)
@@ -1582,7 +1639,7 @@ func (h *Handler) listImageTags(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, loadImageTagsJSON(g, id))
+	WriteJSON(w, http.StatusOK, loadImageTagsJSON(g, id))
 }
 
 // addImageTags handles POST /api/v1/images/:id/tags. Each entry can
@@ -1627,13 +1684,13 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) writeImageTagsResponse(w http.ResponseWriter, g Gallery, id int64, tagWarnings []string) {
 	tags := loadImageTagsJSON(g, id)
 	if len(tagWarnings) > 0 {
-		writeJSON(w, http.StatusOK, map[string]any{
+		WriteJSON(w, http.StatusOK, map[string]any{
 			"tags":         tags,
 			"tag_warnings": tagWarnings,
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, tags)
+	WriteJSON(w, http.StatusOK, tags)
 }
 
 // loadImageTagsJSON reads just the tag list the tag endpoints answer with.
@@ -1785,6 +1842,4 @@ func (h *Handler) resolveImageTagID(g Gallery, imageID int64, tagName string) (i
 	}
 }
 
-func isMultipart(ct string) bool {
-	return strings.HasPrefix(ct, "multipart/form-data")
-}
+func isMultipart(ct string) bool { return strings.HasPrefix(ct, "multipart/form-data") }

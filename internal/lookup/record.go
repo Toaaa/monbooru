@@ -149,23 +149,17 @@ func Reset(database *db.DB, imageID int64, backend string, now time.Time) error 
 // ResetMany is Reset across a set of images on every backend at once, for the
 // bulk opt-in. whereIDs is the caller's `image_id IN (...)` placeholder list
 // and args its binds.
-func ResetMany(e execer, whereIDs string, args []any, now time.Time) error {
+func ResetMany(e db.Execer, whereIDs string, args []any, now time.Time) error {
 	_, err := e.Exec(
 		`UPDATE image_lookups SET attempts = 0, next_due_at = ?, ptr_cursor = NULL
 		 WHERE image_id IN (`+whereIDs+`)`, append([]any{stamp(now)}, args...)...)
 	return err
 }
 
-// execer is the write surface both *sql.DB and *sql.Tx satisfy, so a caller
-// already inside a transaction drops the rows in it.
-type execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}
-
 // DeleteForImage drops an image's recorded attempts. Called where the file's
 // bytes change: the misses are about bytes the image no longer has, so
 // keeping them as history would be a lie rather than a record.
-func DeleteForImage(e execer, imageID int64) error {
+func DeleteForImage(e db.Execer, imageID int64) error {
 	_, err := e.Exec(`DELETE FROM image_lookups WHERE image_id = ?`, imageID)
 	return err
 }

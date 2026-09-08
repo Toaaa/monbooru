@@ -1,4 +1,3 @@
-// Monbooru is a Linux-only deployment; path handling assumes forward slashes.
 package gallery
 
 import (

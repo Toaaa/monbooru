@@ -31,7 +31,8 @@
         <td><code class="mono-small">{{.AliasPath}}</code></td>
         <td>
           <form hx-post="/relations/duplicates/sha256/remove-one" hx-swap="none"
-                hx-confirm="Delete this duplicate file from disk? The canonical path stays."
+                hx-confirm="Delete this duplicate file?"
+                data-confirm-danger="Its bytes are removed from disk. The canonical path stays."
                 data-confirm-ok="Delete" style="display:inline">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="path_id" value="{{.PathID}}">

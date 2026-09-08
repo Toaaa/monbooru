@@ -187,29 +187,14 @@ var queueSourceLabels = []struct{ source, label string }{
 // one detector filed everything, and the breakdown would just restate
 // the total, so the split is nil. Errors degrade to zeroes - the page
 // still renders the rest.
-func queueCounts(cx *galleryCtx, query string, args ...any) (open, skipped int, bySource []queueSourceCount) {
-	rows, err := cx.DB.Read.Query(query, args...)
+func queueCounts(cx *galleryCtx, ceiling *Ceiling) (open, skipped int, bySource []queueSourceCount) {
+	var rank *int
+	if r, active := ceiling.RankCeiling(); active {
+		rank = &r
+	}
+	open, skipped, counts, err := cx.RelationsSvc.QueueBySource(rank)
 	if err != nil {
 		logx.Debugf("relations queue counts: %v", err)
-		return 0, 0, nil
-	}
-	defer func() { _ = rows.Close() }()
-	counts := map[string]int{}
-	for rows.Next() {
-		var source string
-		var isSkipped bool
-		var n int
-		if err := rows.Scan(&source, &isSkipped, &n); err != nil {
-			return 0, 0, nil
-		}
-		if isSkipped {
-			skipped += n
-			continue
-		}
-		open += n
-		counts[source] += n
-	}
-	if rows.Err() != nil {
 		return 0, 0, nil
 	}
 	if len(counts) < 2 {
@@ -248,34 +233,13 @@ type browseCard struct {
 	// so the template paints a left-to-right row of thumbs with one
 	// image per generation. Empty for kinds without a chain structure.
 	Generations [][]int64
-	// TreeRows is the DFS-ordered (root first, then each child's
-	// subtree before its next sibling) flattening of the derivative
-	// tree, each row carrying its depth so the template can indent
-	// children under their parent. Empty for kinds without a tree.
-	TreeRows []treeRow
-}
-
-// treeRow is one entry of a DFS-flattened derivative tree. Depth=0
-// marks the root; Trunks carries one segment per indent column from
-// the root toward this row, encoding the CSS class the template uses
-// to paint the branch lines:
-//   - "line"  : ancestor at this depth still has more siblings below
-//   - "empty" : ancestor at this depth was the last child (no trunk)
-//   - "tee"   : this row is not the last child of its parent (the
-//     parent's vertical continues past this row)
-//   - "elbow" : this row is the last child of its parent (the vertical
-//     stops at the row centre)
-//
-// The connector (tee / elbow) sits at the last index; earlier indices
-// are the ancestor trunks. Root rows carry no trunks.
-type treeRow struct {
-	ID     int64
-	Depth  int
-	Trunks []string
-	// Source is the image this row hangs under, 0 on the root. The
-	// browse card needs it to offer the edge for review; Members alone
-	// is a flat DFS list with no parent link.
-	Source int64
+	// Graph lays the derivative component out for drawing. Empty for
+	// kinds without one.
+	Graph *derivGraph
+	// Roots names the sourceless images the graph descends from,
+	// ascending. Several when the component holds an image made from
+	// more than one source. Empty for kinds without a tree.
+	Roots []int64
 }
 
 // relationsPage serves /relations: header counters and the per-section
@@ -341,18 +305,9 @@ func loadRelationsCounts(cx *galleryCtx, ceiling *Ceiling, skipKind string) rela
 		c.PhashMissing = n
 	}
 	// One grouped scan yields the open and skipped totals plus the
-	// by-detector split; the collection opt-out is the stored
-	// collection_hidden flag, so no counter pays a per-row membership
-	// probe. The numbers still match what a session will actually walk.
-	queueQ := `SELECT p.source, p.skipped_at IS NOT NULL, COUNT(*)
-		FROM potential_relation_pairs p WHERE ` + collectionPairExcl
-	var queueArgs []any
-	if rank, active := ceiling.RankCeiling(); active {
-		queueQ += ` AND p.max_rating_rank <= ?`
-		queueArgs = append(queueArgs, rank)
-	}
-	queueQ += ` GROUP BY p.source, p.skipped_at IS NOT NULL`
-	c.QueueOpen, c.QueueSkipped, c.QueueBySource = queueCounts(cx, queueQ, queueArgs...)
+	// by-detector split. The numbers match what a session will actually
+	// walk, because it is the same scan the session's own counts use.
+	c.QueueOpen, c.QueueSkipped, c.QueueBySource = queueCounts(cx, ceiling)
 	if where, args := ceiling.WhereGroupClean("dup_group_members", "dup_groups.id"); where != "" {
 		get(`SELECT COUNT(*) FROM dup_groups WHERE `+where, &c.DupGroups, args...)
 	} else {
@@ -747,14 +702,17 @@ func loadVersionChainCards(cx *galleryCtx, limit int, ceiling *Ceiling) ([]brows
 }
 
 // loadDerivativeTreeCards is the derivative-edge analogue of
-// loadVersionChainCards. Each tree roots at a source that isn't itself
-// a derivative; a depth-first walk from the root produces TreeRows
-// (root first, then each subtree before its next sibling) so the
-// template can indent each row by its depth and the branching is
-// visible at a glance. Members keeps the same DFS order so per-member
-// metadata maps key against it. Returns the total tree count (every
-// surviving tree, regardless of limit) so the caller can drive the
-// matching counter without re-walking the edges.
+// loadVersionChainCards. One card per connected component: an image
+// made from several sources joins their trees, so a component can have
+// several roots. Each root gets a depth-first walk (root first, then
+// each subtree before its next sibling) so the template can indent
+// each row by its depth and the branching is visible at a glance; a
+// node reached again through a second source emits a Repeat row rather
+// than a second copy of its subtree. Members keeps the DFS order of
+// first visits so per-member metadata maps key against it. Returns the
+// total card count (every surviving component, regardless of limit) so
+// the caller can drive the matching counter without re-walking the
+// edges.
 func loadDerivativeTreeCards(cx *galleryCtx, limit int, ceiling *Ceiling) ([]browseCard, int, error) {
 	rows, err := cx.DB.Read.Query(`SELECT derivative_image_id, source_image_id, created_at FROM derivative_edges`)
 	if err != nil {
@@ -762,8 +720,8 @@ func loadDerivativeTreeCards(cx *galleryCtx, limit int, ceiling *Ceiling) ([]bro
 	}
 	defer func() { _ = rows.Close() }()
 	derivativesOf := map[int64][]int64{} // source -> derivatives (sorted by id ASC)
-	sourceOf := map[int64]int64{}        // derivative -> source
-	derivCreated := map[int64]string{}   // derivative -> edge's created_at
+	sourcesOf := map[int64][]int64{}     // derivative -> sources
+	derivCreated := map[int64]string{}   // derivative -> newest incoming edge's created_at
 	for rows.Next() {
 		var d, src int64
 		var ts string
@@ -771,8 +729,10 @@ func loadDerivativeTreeCards(cx *galleryCtx, limit int, ceiling *Ceiling) ([]bro
 			return nil, 0, scanErr
 		}
 		derivativesOf[src] = append(derivativesOf[src], d)
-		sourceOf[d] = src
-		derivCreated[d] = ts
+		sourcesOf[d] = append(sourcesOf[d], src)
+		if ts > derivCreated[d] {
+			derivCreated[d] = ts
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
@@ -784,24 +744,35 @@ func loadDerivativeTreeCards(cx *galleryCtx, limit int, ceiling *Ceiling) ([]bro
 	}
 	rootSet := map[int64]bool{}
 	for src := range derivativesOf {
-		if _, isDeriv := sourceOf[src]; !isDeriv {
+		if len(sourcesOf[src]) == 0 {
 			rootSet[src] = true
 		}
 	}
-	roots := sortedRootsDesc(rootSet)
-	cards := make([]browseCard, 0, len(roots))
-	for _, root := range roots {
-		var members []int64
-		var treeRows []treeRow
-		latestTS := ""
-		dfsDerivativeTree(root, 0, 0, nil, true, derivativesOf, derivCreated, &members, &treeRows, &latestTS)
+	emitted := map[int64]bool{}
+	cards := make([]browseCard, 0, len(rootSet))
+	for _, root := range sortedRootsDesc(rootSet) {
+		if emitted[root] {
+			continue
+		}
+		compRoots := componentRoots(root, derivativesOf, sourcesOf)
+		members := componentMembers(compRoots, derivativesOf, sourcesOf)
+		for _, m := range members {
+			emitted[m] = true
+		}
 		if ceiling.AnyTainted(members) {
 			continue
+		}
+		latestTS := ""
+		for _, m := range members {
+			if ts := derivCreated[m]; ts > latestTS {
+				latestTS = ts
+			}
 		}
 		cards = append(cards, browseCard{
 			Kind:      "derivative",
 			Members:   members,
-			TreeRows:  treeRows,
+			Graph:     layOutDerivatives(members, sourcesOf),
+			Roots:     compRoots,
 			CreatedAt: humanISOTime(latestTS),
 		})
 	}
@@ -809,56 +780,215 @@ func loadDerivativeTreeCards(cx *galleryCtx, limit int, ceiling *Ceiling) ([]bro
 	return cards, total, nil
 }
 
-// dfsDerivativeTree appends each tree node and its subtree to members
-// and rows in depth-first order. Sibling order matches the caller's
-// pre-sorted derivativesOf slice (ascending id) so the visual layout
-// is stable across renders. ancestorTrunks is the prefix common to
-// every descendant of this node (one entry per ancestor depth);
-// isLast says whether this node is the last child of its parent so
-// the connector is drawn as an elbow when true and a tee when false.
-func dfsDerivativeTree(node, source int64, depth int, ancestorTrunks []string, isLast bool, derivativesOf map[int64][]int64, derivCreated map[int64]string, members *[]int64, rows *[]treeRow, latestTS *string) {
-	*members = append(*members, node)
-	*rows = append(*rows, treeRow{ID: node, Depth: depth, Trunks: rowTrunks(ancestorTrunks, depth, isLast), Source: source})
-	if ts := derivCreated[node]; ts > *latestTS {
-		*latestTS = ts
-	}
-	childAncestors := extendAncestorTrunks(ancestorTrunks, depth, isLast)
-	children := derivativesOf[node]
-	for i, child := range children {
-		childIsLast := i == len(children)-1
-		dfsDerivativeTree(child, node, depth+1, childAncestors, childIsLast, derivativesOf, derivCreated, members, rows, latestTS)
-	}
+// The horizontal geometry the derivative graph is drawn on. Coordinates are
+// per-mille of the graph's own width rather than pixels, so the drawing
+// follows whatever width the card gives it: the CSS splits every row into
+// the same number of equal columns and the wires land on their centres at
+// any size. Row height is deliberately not among them - the wires live in
+// bands of their own between the rows, so a cell can be as tall as its
+// actions need.
+const (
+	derivSpanX = 1000
+	// derivBandH matches .deriv-band's height; the wires are drawn in it.
+	derivBandH = 44
+)
+
+// derivNode is one image in the drawn graph: where it sits, and which
+// images it was made from - the template hangs one action per incoming
+// edge off the node that receives it.
+type derivNode struct {
+	ID      int64
+	Row     int
+	Col     int
+	Sources []int64
 }
 
-// rowTrunks builds the per-row trunks slice the template renders. The
-// root (depth 0) carries no trunks; every other row gets one entry per
-// ancestor depth plus the tee / elbow connector.
-func rowTrunks(ancestorTrunks []string, depth int, isLast bool) []string {
-	return trunkSlice(ancestorTrunks, depth, isLast, "elbow", "tee")
+// derivSeg is one edge's crossing of one band, from an x on the band's top
+// edge to an x on its bottom edge. An edge spanning several rows is drawn
+// as one segment per band it crosses, so the line stays continuous without
+// the layout knowing how tall any row rendered. From / To name the edge the
+// segment belongs to, which is what pairs a wire with the action that would
+// cut it.
+type derivSeg struct {
+	X1, X2   int
+	From, To int64
 }
 
-// extendAncestorTrunks computes the ancestor-trunk slice each child of
-// the current node sees: the existing ancestors plus a new segment at
-// the current depth. The new segment is "line" when this node has more
-// siblings below (its column continues past its children) and "empty"
-// when this node is the last child (the column ends).
-func extendAncestorTrunks(ancestorTrunks []string, depth int, isLast bool) []string {
-	return trunkSlice(ancestorTrunks, depth, isLast, "empty", "line")
+// derivGraph is a whole derivative component laid out for drawing: rows of
+// cells with a band of wires between each pair, so an image made from three
+// sources is three lines converging on it rather than one branch and two
+// back-references.
+type derivGraph struct {
+	Rows  [][]derivNode
+	Bands [][]derivSeg
+	// Cols is the widest row, which the CSS divides the graph into so a
+	// node's column is the same fraction of the width the wires assume.
+	Cols int
+	// Width and BandH are the wires' own coordinate space, carried here so
+	// it is not spelled again in the templates.
+	Width int
+	BandH int
 }
 
-// trunkSlice appends one segment to the ancestor trunks: last when this
-// node is its parent's final child, more otherwise. Depth 0 is the root,
-// which carries no trunks at all.
-func trunkSlice(ancestorTrunks []string, depth int, isLast bool, last, more string) []string {
-	if depth == 0 {
+// layOutDerivatives assigns every member a row and a column and cuts the
+// edges into per-band segments. A node's row is one past the deepest of its
+// sources (longest-path layering), which is what puts every edge on a
+// downward line: the graph is acyclic and capped at MaxVersionChainDepth,
+// so the walk settles. Columns are id order within a row, so a render is
+// stable.
+func layOutDerivatives(members []int64, sourcesOf map[int64][]int64) *derivGraph {
+	if len(members) == 0 {
 		return nil
 	}
-	out := make([]string, 0, depth)
-	out = append(out, ancestorTrunks...)
-	if isLast {
-		return append(out, last)
+	row := make(map[int64]int, len(members))
+	for _, id := range members {
+		row[id] = 0
 	}
-	return append(out, more)
+	// Repeat until nothing moves: a node's row depends on its sources',
+	// and members are not in dependency order.
+	for pass := 0; pass <= relations.MaxVersionChainDepth; pass++ {
+		moved := false
+		for _, id := range members {
+			want := 0
+			for _, src := range sourcesOf[id] {
+				if r, ok := row[src]; ok && r+1 > want {
+					want = r + 1
+				}
+			}
+			if want > row[id] {
+				row[id] = want
+				moved = true
+			}
+		}
+		if !moved {
+			break
+		}
+	}
+
+	byRow := map[int][]int64{}
+	depth := 0
+	for _, id := range members {
+		byRow[row[id]] = append(byRow[row[id]], id)
+		if row[id] > depth {
+			depth = row[id]
+		}
+	}
+	g := &derivGraph{Rows: make([][]derivNode, depth+1), Bands: make([][]derivSeg, depth), BandH: derivBandH}
+	col := make(map[int64]int, len(members))
+	widest := 0
+	// Rows are ordered top down, so every source already has its column
+	// when the row below it is placed: a node sits over the average of the
+	// images it was made from, which is what keeps the lines from crossing
+	// each other on the way down. Ties and sourceless rows fall back to id
+	// order, so a render is stable.
+	for r := 0; r <= depth; r++ {
+		ids := byRow[r]
+		slices.Sort(ids)
+		if r > 0 {
+			slices.SortStableFunc(ids, func(a, b int64) int {
+				return cmp.Compare(parentMean(a, sourcesOf, col), parentMean(b, sourcesOf, col))
+			})
+		}
+		g.Rows[r] = make([]derivNode, len(ids))
+		for c, id := range ids {
+			col[id] = c
+			g.Rows[r][c] = derivNode{ID: id, Row: r, Col: c, Sources: sourcesOf[id]}
+		}
+		if len(ids) > widest {
+			widest = len(ids)
+		}
+	}
+	g.Cols, g.Width = widest, derivSpanX
+
+	// The centre of a node's column, in per-mille of the graph. A shorter
+	// row is centred under the widest one, the way the CSS centres it, so a
+	// fan-in reads as one shape; the half-column that centring can leave
+	// over is why the numerator counts half-columns.
+	centreX := func(id int64) int {
+		halves := widest - len(g.Rows[row[id]]) + 2*col[id] + 1
+		return halves * derivSpanX / (2 * widest)
+	}
+	for _, id := range members {
+		for _, src := range sourcesOf[id] {
+			from, to := row[src], row[id]
+			if to <= from {
+				continue
+			}
+			x1, x2, span := centreX(src), centreX(id), to-from
+			for b := from; b < to; b++ {
+				g.Bands[b] = append(g.Bands[b], derivSeg{
+					X1:   x1 + (x2-x1)*(b-from)/span,
+					X2:   x1 + (x2-x1)*(b+1-from)/span,
+					From: src,
+					To:   id,
+				})
+			}
+		}
+	}
+	return g
+}
+
+// parentMean is the average column of the images a node was made from, the
+// position it would sit at with nothing else in the way.
+func parentMean(id int64, sourcesOf map[int64][]int64, col map[int64]int) float64 {
+	sum, n := 0, 0
+	for _, src := range sourcesOf[id] {
+		if c, ok := col[src]; ok {
+			sum += c
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return float64(sum) / float64(n)
+}
+
+// componentMembers lists every image reachable from the component's roots,
+// ascending, which is the set a card counts and the ceiling filters.
+func componentMembers(roots []int64, derivativesOf, sourcesOf map[int64][]int64) []int64 {
+	seen := map[int64]bool{}
+	var queue []int64
+	for _, r := range roots {
+		if !seen[r] {
+			seen[r] = true
+			queue = append(queue, r)
+		}
+	}
+	for i := 0; i < len(queue); i++ {
+		for _, m := range slices.Concat(derivativesOf[queue[i]], sourcesOf[queue[i]]) {
+			if !seen[m] {
+				seen[m] = true
+				queue = append(queue, m)
+			}
+		}
+	}
+	slices.Sort(queue)
+	return queue
+}
+
+// componentRoots returns every sourceless image joined to start by
+// derivative edges in either direction, ascending, so the walk that
+// renders the component draws a multi-source node under its
+// lowest-numbered source.
+func componentRoots(start int64, derivativesOf, sourcesOf map[int64][]int64) []int64 {
+	seen := map[int64]bool{start: true}
+	queue := []int64{start}
+	var roots []int64
+	for i := 0; i < len(queue); i++ {
+		n := queue[i]
+		if len(sourcesOf[n]) == 0 {
+			roots = append(roots, n)
+		}
+		for _, m := range slices.Concat(derivativesOf[n], sourcesOf[n]) {
+			if !seen[m] {
+				seen[m] = true
+				queue = append(queue, m)
+			}
+		}
+	}
+	slices.Sort(roots)
+	return roots
 }
 
 // scanGroupMembers returns every image_id belonging to the named
@@ -921,7 +1051,7 @@ func (s *Server) browseRelationsPage(w http.ResponseWriter, r *http.Request) {
 	kind := r.URL.Query().Get("kind")
 	kind = cmp.Or(kind, "duplicate")
 	if !validBrowseKinds[kind] {
-		http.NotFound(w, r)
+		s.notFoundHandler(w, r)
 		return
 	}
 	page := 1

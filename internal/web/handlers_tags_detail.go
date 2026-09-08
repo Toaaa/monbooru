@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/monbooru/monbooru/internal/db"
@@ -36,13 +37,14 @@ type tagDetailData struct {
 }
 
 func (s *Server) tagDetailHandler(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
-	if !ok {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		s.notFoundHandler(w, r)
 		return
 	}
 	tag, err := s.tagSvc().GetTag(id)
 	if errors.Is(err, tags.ErrTagNotFound) {
-		http.NotFound(w, r)
+		s.notFoundHandler(w, r)
 		return
 	}
 	if err != nil {
@@ -108,7 +110,7 @@ func (s *Server) tagDetailHandler(w http.ResponseWriter, r *http.Request) {
 			 CROSS JOIN images i ON i.id = it.image_id
 			 WHERE it.tag_id = ? AND i.is_missing = 0`
 		recentArgs := []any{id}
-		if where, wargs := resolveCeiling(r, s.Active()).WhereOne("i.id"); where != "" {
+		if where, wargs := resolveCeiling(r, s.active()).WhereOne("i.id"); where != "" {
 			recentQ += ` AND ` + where
 			recentArgs = append(recentArgs, wargs...)
 		}

@@ -25,7 +25,6 @@ type setupData struct {
 	Title        string
 	BooruFavicon string
 	Theme        bool
-	CustomCSS    bool
 	Err          string
 	GalleryPath  string
 	LAN          bool
@@ -49,11 +48,11 @@ func (s *Server) setupPending() bool {
 	return !s.cfg.SetupDone
 }
 
-// SetupMiddleware sends every page to the wizard until it has been through
+// setupMiddleware sends every page to the wizard until it has been through
 // once. The exemptions are what the wizard itself needs plus the health
 // probe, which the single-instance check and the container healthcheck both
 // depend on answering at all times.
-func (s *Server) SetupMiddleware(next http.Handler) http.Handler {
+func (s *Server) setupMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.setupPending() || setupExempt(r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -93,7 +92,7 @@ func setupExempt(path string) bool {
 
 func (s *Server) setupPage(w http.ResponseWriter, r *http.Request) {
 	if !s.desktop {
-		http.NotFound(w, r)
+		s.notFoundHandler(w, r)
 		return
 	}
 	s.cfgMu.RLock()
@@ -127,7 +126,6 @@ func (s *Server) renderSetup(w http.ResponseWriter, r *http.Request, d setupData
 	d.CSRFToken = s.csrfToken(sessionFromContext(r.Context()))
 	d.BooruFavicon = s.booruFaviconURL()
 	d.Theme = s.activeTheme().Path != ""
-	d.CustomCSS = s.customCSSPath() != ""
 	d.Port = port
 	d.Integration = s.desktopIntegration()
 	s.renderTemplate(w, "setup.html", d)
@@ -151,7 +149,7 @@ func (s *Server) setupPost(w http.ResponseWriter, r *http.Request) {
 		Menu:        r.FormValue("menu_entry") == "on",
 		Autostart:   r.FormValue("start_at_login") == "on",
 	}
-	if err := s.RepointGallery(s.defaultGallery(), form.GalleryPath); err != nil {
+	if err := s.repointGallery(s.defaultGallery(), form.GalleryPath); err != nil {
 		form.Err = err.Error()
 		s.renderSetup(w, r, form)
 		return

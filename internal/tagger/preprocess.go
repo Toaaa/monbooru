@@ -131,7 +131,10 @@ func resizeAspect(src image.Image, size int) (scaled *image.RGBA, offX, offY int
 		scaleW = max(1, w*size/h)
 	}
 	scaled = image.NewRGBA(image.Rect(0, 0, scaleW, scaleH))
-	draw.ApproxBiLinear.Scale(scaled, scaled.Bounds(), src, b, draw.Src, nil)
+	// Only the kernel scalers widen their support as they shrink.
+	// ApproxBiLinear reads four source pixels at any ratio, and the
+	// aliasing that leaves is what a tagger scores as pixel art.
+	draw.BiLinear.Scale(scaled, scaled.Bounds(), src, b, draw.Src, nil)
 	return scaled, (size - scaleW) / 2, (size - scaleH) / 2
 }
 

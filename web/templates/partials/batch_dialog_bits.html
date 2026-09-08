@@ -1,7 +1,3 @@
-{{/* Shared batch-dialog scaffolding: the live count pair every dialog
-     header carries (ids <prefix>-count / <prefix>-noun, fed by
-     scopeCount), and the autocomplete input wrap the label dialogs
-     share (dict: Name, InputID, Endpoint, SuggestID). */}}
 {{define "batch_count"}}<strong id="{{.}}-count">0</strong> <span id="{{.}}-noun">images</span>{{end}}
 
 {{define "suggest_input"}}
@@ -18,8 +14,6 @@
       </div>
 {{end}}
 
-{{/* The tag-input twin: fixed /internal/tags/suggest endpoint, form-value
-     submission via hx-include, and the tag-flavoured dropdown. */}}
 {{define "tag_suggest_input"}}
       <div class="series-input-wrap">
         <input type="text" name="{{.Name}}" id="{{.InputID}}"

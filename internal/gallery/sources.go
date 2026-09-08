@@ -50,11 +50,12 @@ func updateSourceField(database *db.DB, imageID int64, site, postID, col string,
 func SourcesForImage(database *db.DB, imageID int64) ([]models.ImageSource, error) {
 	return db.QueryAll(database.Read, func(rows *sql.Rows) (models.ImageSource, error) {
 		var s models.ImageSource
-		err := rows.Scan(&s.Site, &s.PostID, &s.URL, &s.Commentary, &s.Original, &s.Similarity, &s.MD5, &s.MD5Match,
+		err := rows.Scan(&s.Site, &s.PostID, &s.URL, &s.Commentary, &s.CommentaryTranslated, &s.Original,
+			&s.Similarity, &s.MD5, &s.MD5Match,
 			&s.UpgradeKept, &s.PostWidth, &s.PostHeight, &s.PostSize, &s.PostExt)
 		return s, err
 	},
-		`SELECT site, post_id, url, commentary, original, similarity, md5, md5_match,
+		`SELECT site, post_id, url, commentary, commentary_translated, original, similarity, md5, md5_match,
 		        upgrade_kept, post_width, post_height, post_size, post_ext
 		 FROM image_sources WHERE image_id = ? ORDER BY rowid`, imageID)
 }
@@ -228,9 +229,8 @@ func SourceSimilarityMatched(database *db.DB, imageID int64, site, postID string
 // commentary / original / md5 / fetched_at and its age (a relabelled primary
 // stays primary), and re-keys the origin's annotations so they follow the new
 // identity. When the new identity already exists on the image the two rows
-// merge: the target keeps its own commentary and original unless it has none,
-// and the old row is dropped. A missing prev identity falls back to a plain
-// upsert.
+// merge: the target keeps its own text fields unless it has none, and the old
+// row is dropped. A missing prev identity falls back to a plain upsert.
 func RenameSourceMembership(database *db.DB, imageID int64, prevSite, prevPost, site, postID, url string) error {
 	prevSite = strings.TrimSpace(prevSite)
 	prevPost = strings.TrimSpace(prevPost)
@@ -271,9 +271,10 @@ func RenameSourceMembership(database *db.DB, imageID int64, prevSite, prevPost, 
 				if _, err := tx.Exec(
 					`UPDATE image_sources SET url = ?,
 					        commentary = CASE WHEN commentary = '' THEN (SELECT commentary FROM image_sources WHERE rowid = ?) ELSE commentary END,
+					        commentary_translated = CASE WHEN commentary_translated = '' THEN (SELECT commentary_translated FROM image_sources WHERE rowid = ?) ELSE commentary_translated END,
 					        original = CASE WHEN original = '' THEN (SELECT original FROM image_sources WHERE rowid = ?) ELSE original END
 					 WHERE rowid = ?`,
-					url, prevRid, prevRid, targetRid); err != nil {
+					url, prevRid, prevRid, prevRid, targetRid); err != nil {
 					return err
 				}
 				if _, err := tx.Exec(`DELETE FROM image_sources WHERE rowid = ?`, prevRid); err != nil {
@@ -337,6 +338,12 @@ func setSourceTextField(database *db.DB, imageID int64, site, postID, col, value
 // setSourceTextField for the upsert / clear semantics.
 func SetSourceCommentary(database *db.DB, imageID int64, site, postID, commentary string) error {
 	return setSourceTextField(database, imageID, site, postID, "commentary", commentary)
+}
+
+// SetSourceCommentaryTranslated sets the translation of one origin's artist
+// commentary. See setSourceTextField for the upsert / clear semantics.
+func SetSourceCommentaryTranslated(database *db.DB, imageID int64, site, postID, translated string) error {
+	return setSourceTextField(database, imageID, site, postID, "commentary_translated", translated)
 }
 
 // SetSourceOriginal sets the upstream artist source the booru post declared for

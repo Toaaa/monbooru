@@ -117,24 +117,15 @@ func (s *Service) RelatedImages(imageID int64, limit int, ratingCeiling string) 
 // SuggestTags returns tags matching prefix, sorted by usage_count DESC.
 // Two-pass shape: prefix matches first, then substring matches.
 func (s *Service) SuggestTags(prefix string, limit int) ([]models.Tag, error) {
-	return suggestUsageRanked(s.db, prefix, "", false, limit)
+	return SuggestUsageRanked(s.db, prefix, "", false, limit)
 }
 
-// SuggestUsageRanked is the exported entry point for callers outside
-// the tags package (the no-context fast path of search.SuggestTagsWithFilter).
-// requireUsage gates the `usage_count > 0` filter so the search-bar
-// autocomplete hides zero-usage tags while the detail-page tag input
-// (where freshly-declared tags must surface immediately) keeps them.
-func SuggestUsageRanked(database *db.DB, prefix, categoryName string, requireUsage bool, limit int) ([]models.Tag, error) {
-	return suggestUsageRanked(database, prefix, categoryName, requireUsage, limit)
-}
-
-// suggestUsageRanked is the shared two-pass prefix→substring helper:
+// SuggestUsageRanked is the shared two-pass prefix→substring helper:
 // prefix matches first (sorted by usage_count DESC), then substring
 // matches that aren't already in the prefix set, until limit is hit.
 // categoryName, when non-empty, scopes both passes to that category;
 // requireUsage adds `usage_count > 0`.
-func suggestUsageRanked(database *db.DB, prefix, categoryName string, requireUsage bool, limit int) ([]models.Tag, error) {
+func SuggestUsageRanked(database *db.DB, prefix, categoryName string, requireUsage bool, limit int) ([]models.Tag, error) {
 	prefix = db.EscapeLike(NormalizeTagName(prefix))
 	// The ranked pick runs against tags alone so it can ride
 	// idx_tags_active_usage and stop at the limit. With the category

@@ -23,49 +23,12 @@ var validOrderModes = map[string]bool{
 	"random":                  true,
 }
 
-// collectionPairExcl hides queue pairs whose two images share a
-// collection absent from collection_find_relations (the per-collection
-// opt-in toggled on /collections): membership already relates the
-// images, so the session skips those pairs unless the operator enables
-// the switch. The verdict is the stored flag the bootstrap triggers
-// maintain, so the queue scans stay free of per-row membership probes.
-// Splices anywhere the queue is aliased `p`.
-const collectionPairExcl = "p.collection_hidden = 0"
-
 // validDetectors enumerates the session's detector scopes. "both" is
 // the unfiltered walk; anything else collapses to it.
 var validDetectors = map[string]bool{
 	"phash": true,
 	"tags":  true,
 	"both":  true,
-}
-
-// detectorFilter narrows the queue to pairs one detector found. A
-// pair both detectors nominated satisfies either scope, and a pair the
-// operator reopened satisfies both: it is there because they asked for
-// it, so no scope should hide it.
-func detectorFilter(mode string) string {
-	switch mode {
-	case "phash":
-		return " AND p.source IN ('phash', 'both', 'review')"
-	case "tags":
-		return " AND p.source IN ('tags', 'both', 'review')"
-	}
-	return ""
-}
-
-// orderClauseForMode returns the ORDER BY tail the queue SELECT uses.
-// The walk only serves unskipped rows, so the mode's own keys are the
-// whole order.
-func orderClauseForMode(mode string) string {
-	base := "ORDER BY "
-	switch mode {
-	case "largest_file_first":
-		return base + "(COALESCE(ia.file_size, 0) + COALESCE(ib.file_size, 0)) DESC, p.distance ASC, p.a_image_id ASC"
-	case "random":
-		return base + "random()"
-	}
-	return base + "p.distance ASC, (COALESCE(ia.file_size, 0) + COALESCE(ib.file_size, 0)) DESC, p.a_image_id ASC"
 }
 
 // sessionPairView is everything the swipe page needs about one pair.
@@ -95,9 +58,7 @@ type sessionPairView struct {
 }
 
 // ScorePercent renders the tag score the way the card reads it.
-func (v sessionPairView) ScorePercent() int {
-	return int(math.Round(v.Score * 100))
-}
+func (v sessionPairView) ScorePercent() int { return int(math.Round(v.Score * 100)) }
 
 // FromTags reports whether tag similarity had a hand in queueing the
 // pair, which is what gates the shared-tag evidence row.
@@ -129,7 +90,7 @@ func (s *Server) sessionPage(w http.ResponseWriter, r *http.Request) {
 	}
 	order := r.URL.Query().Get("order")
 	if order == "" {
-		order = loadSessionOrder(cx)
+		order = cx.RelationsSvc.SessionOrder()
 	}
 	if !validOrderModes[order] {
 		order = "smallest_distance_first"
@@ -138,7 +99,7 @@ func (s *Server) sessionPage(w http.ResponseWriter, r *http.Request) {
 		// Operator switched modes from the picker; persist so a reload picks
 		// up the same shuffle. Gate on validity so a bogus ?order= doesn't
 		// overwrite the saved preference with the fallback.
-		saveSessionOrder(cx, order)
+		cx.RelationsSvc.SetSessionOrder(order)
 	}
 	// The scope opens on the unfiltered walk every time: narrowing it is
 	// a choice for the sitting, carried on the URL through the decide
@@ -245,134 +206,41 @@ type sessionPageData struct {
 	SharedTagsTotal int
 }
 
-// loadSessionOrder reads the order_mode for the singleton session
-// row, defaulting if the row is missing.
-func loadSessionOrder(cx *galleryCtx) string {
-	var mode string
-	err := cx.DB.Read.QueryRow(`SELECT order_mode FROM relation_session WHERE id = 1`).Scan(&mode)
-	if err == sql.ErrNoRows {
-		return "smallest_distance_first"
+// loadNextPair pulls the next queue row plus the queue breakdown, and
+// dresses the row for the swipe page: the filename, the tag counts, and
+// which side leads.
+func loadNextPair(cx *galleryCtx, order, detector string, ceiling *Ceiling, pinA, pinB int64) (*sessionPairView, relations.QueueCounts, error) {
+	var rank *int
+	if r, active := ceiling.RankCeiling(); active {
+		rank = &r
 	}
+	counts, err := cx.RelationsSvc.QueueCountsFor(detector, rank)
 	if err != nil {
-		return "smallest_distance_first"
-	}
-	return mode
-}
-
-// saveSessionOrder upserts the singleton row.
-func saveSessionOrder(cx *galleryCtx, mode string) {
-	_, err := cx.DB.Write.Exec(
-		`INSERT INTO relation_session (id, order_mode) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET order_mode = excluded.order_mode`,
-		mode,
-	)
-	if err != nil {
-		logx.Debugf("save session order: %v", err)
-	}
-}
-
-// sessionQueueCounts splits the scoped queue the way the page reads
-// it: what the walk can serve now, what the rating ceiling holds back,
-// and what the operator has skipped. A skipped pair stays queued but
-// out of the walk until "Reset skipped" on the hub puts it back, so a
-// Skip always moves the sitting forward.
-type sessionQueueCounts struct {
-	Open            int
-	HiddenByCeiling int
-	Skipped         int
-}
-
-// loadNextPair pulls the next queue row plus both image rows and the
-// queue breakdown. The counts come from one lightweight covering scan
-// of the queue table. ceiling gates each side of the pair on the
-// absence of a rating tag above the cookie level so the session walks
-// only what the operator's ceiling already lets them see in the
-// gallery.
-func loadNextPair(cx *galleryCtx, order, detector string, ceiling *Ceiling, pinA, pinB int64) (*sessionPairView, sessionQueueCounts, error) {
-	scope := detectorFilter(detector)
-	// The ceiling gate reads the stored pair rank, so the counts and the
-	// pick below stay free of per-row image_tags probes.
-	where, args := "", []any(nil)
-	if rank, active := ceiling.RankCeiling(); active {
-		where = "p.max_rating_rank <= ?"
-		args = []any{rank}
-	}
-	openExpr := "p.skipped_at IS NULL"
-	if where != "" {
-		openExpr += " AND " + where
-	}
-	var counts sessionQueueCounts
-	var unskipped int
-	countQ := `
-		SELECT COALESCE(SUM(CASE WHEN p.skipped_at IS NULL THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN ` + openExpr + ` THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN p.skipped_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-		FROM potential_relation_pairs p
-		WHERE ` + collectionPairExcl + scope
-	if err := cx.DB.Read.QueryRow(countQ, args...).Scan(&unskipped, &counts.Open, &counts.Skipped); err != nil {
 		return nil, counts, err
 	}
-	counts.HiddenByCeiling = unskipped - counts.Open
 	pinned := pinA > 0 && pinB > 0
 	if counts.Open == 0 && !pinned {
 		return nil, counts, nil
 	}
-	selectBase := `
-		SELECT p.a_image_id, p.b_image_id, p.distance, p.source, COALESCE(p.score, 0),
-		       ia.canonical_path, COALESCE(ia.width, 0), COALESCE(ia.height, 0), ia.file_size, ia.file_type,
-		       ib.canonical_path, COALESCE(ib.width, 0), COALESCE(ib.height, 0), ib.file_size, ib.file_type
-		FROM potential_relation_pairs p
-		JOIN images ia ON ia.id = p.a_image_id
-		JOIN images ib ON ib.id = p.b_image_id`
-	orderedQ := selectBase + "\n\t\tWHERE " + collectionPairExcl + scope + " AND p.skipped_at IS NULL"
-	if where != "" {
-		orderedQ += " AND " + where
-	}
-	orderedQ += "\n\t\t" + orderClauseForMode(order) + "\n\t\tLIMIT 1"
-	query, qargs := orderedQ, args
-	if pinned {
-		lo, hi := pinA, pinB
-		if lo > hi {
-			lo, hi = hi, lo
-		}
-		// A pinned pair is what the operator explicitly asked to see, so
-		// neither the detector scope nor the skipped filter applies.
-		pinnedQ := selectBase + "\n\t\tWHERE " + collectionPairExcl
-		if where != "" {
-			pinnedQ += " AND " + where
-		}
-		pinnedQ += " AND p.a_image_id = ? AND p.b_image_id = ?\n\t\tLIMIT 1"
-		query, qargs = pinnedQ, append(append([]any{}, args...), lo, hi)
-	}
-	var aPath, bPath string
-	var aW, aH, bW, bH sql.NullInt64
-	view := sessionPairView{Order: order, Remaining: counts.Open}
-	scan := func(q string, a ...any) error {
-		return cx.DB.Read.QueryRow(q, a...).Scan(
-			&view.A.ID, &view.B.ID, &view.Distance, &view.Source, &view.Score,
-			&aPath, &aW, &aH, &view.A.FileSize, &view.A.FileType,
-			&bPath, &bW, &bH, &view.B.FileSize, &view.B.FileType,
-		)
-	}
-	err := scan(query, qargs...)
-	if err == sql.ErrNoRows && pinned {
-		// Pinned pair isn't in the visible queue (already resolved, or
-		// hidden by the ceiling); fall back to the normal ordered pick.
-		err = scan(orderedQ, args...)
-	}
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, counts, nil
-		}
+	pair, err := cx.RelationsSvc.NextPair(order, detector, rank, pinA, pinB)
+	if err != nil || pair == nil {
 		return nil, counts, err
 	}
-	view.A.Width = aW
-	view.A.Height = aH
-	view.B.Width = bW
-	view.B.Height = bH
-	view.A.Filename = path.Base(aPath)
-	view.B.Filename = path.Base(bPath)
-	view.A.TagCount = countTags(cx, view.A.ID)
-	view.B.TagCount = countTags(cx, view.B.ID)
+
+	view := sessionPairView{
+		Order: order, Remaining: counts.Open,
+		Distance: pair.Distance, Source: pair.Source, Score: pair.Score,
+		A: sessionImageView{
+			ID: pair.A.ID, Width: pair.A.Width, Height: pair.A.Height,
+			FileSize: pair.A.FileSize, FileType: pair.A.FileType,
+			Filename: path.Base(pair.A.CanonicalPath), TagCount: countTags(cx, pair.A.ID),
+		},
+		B: sessionImageView{
+			ID: pair.B.ID, Width: pair.B.Width, Height: pair.B.Height,
+			FileSize: pair.B.FileSize, FileType: pair.B.FileType,
+			Filename: path.Base(pair.B.CanonicalPath), TagCount: countTags(cx, pair.B.ID),
+		},
+	}
 	// Bigger file first is a duplicate heuristic: the larger file is the
 	// likelier original. A tag-sourced pair is usually a variant or a
 	// derivative, where the buttons read "right is based on left", so
@@ -536,7 +404,7 @@ func (s *Server) sessionDecidePost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.RelationsSvc == nil {
 		http.Error(w, "no gallery", http.StatusServiceUnavailable)
 		return
@@ -563,10 +431,7 @@ func (s *Server) sessionDecidePost(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	if decision == "skip" {
-		if _, err := cx.DB.Write.Exec(
-			`UPDATE potential_relation_pairs SET skipped_at = ? WHERE a_image_id = ? AND b_image_id = ?`,
-			now, a, b,
-		); err != nil {
+		if err := cx.RelationsSvc.SkipPair(a, b, now); err != nil {
 			logx.Warnf("session skip: %v", err)
 			http.Error(w, "skip", http.StatusInternalServerError)
 			return
@@ -599,9 +464,7 @@ func (s *Server) sessionDecidePost(w http.ResponseWriter, r *http.Request) {
 		writeRelationError(w, err)
 		return
 	}
-	if _, err := cx.DB.Write.Exec(
-		`DELETE FROM potential_relation_pairs WHERE a_image_id = ? AND b_image_id = ?`, a, b,
-	); err != nil {
+	if err := cx.RelationsSvc.DropQueuedPair(a, b); err != nil {
 		logx.Warnf("session queue drop: %v", err)
 	}
 	cx.InvalidateCaches()

@@ -28,21 +28,28 @@ if [ "$GOOS" = windows ]; then
   curl -fsSL -o /tmp/ort.zip "${ort_base}/onnxruntime-${ort_arch}-${ORT_VERSION}.zip"
   verify /tmp/ort.zip "$ort_sha"
   unzip -q /tmp/ort.zip -d /tmp/ort
-  cp "/tmp/ort/onnxruntime-${ort_arch}-${ORT_VERSION}/lib/onnxruntime.dll" tools/
+  ort_dir="/tmp/ort/onnxruntime-${ort_arch}-${ORT_VERSION}"
+  cp "$ort_dir/lib/onnxruntime.dll" tools/
   curl -fsSL -o /tmp/ffmpeg.zip "${ff_base}/${FFMPEG_NAME}-${ff_arch}.zip"
   verify /tmp/ffmpeg.zip "$ff_sha"
   unzip -q /tmp/ffmpeg.zip -d /tmp/ff
-  cp "/tmp/ff/${FFMPEG_NAME}-${ff_arch}/bin/ffmpeg.exe" \
-     "/tmp/ff/${FFMPEG_NAME}-${ff_arch}/bin/ffprobe.exe" tools/
+  ff_dir="/tmp/ff/${FFMPEG_NAME}-${ff_arch}"
+  cp "$ff_dir/bin/ffmpeg.exe" "$ff_dir/bin/ffprobe.exe" tools/
 else
   curl -fsSL -o /tmp/ort.tgz "${ort_base}/onnxruntime-linux-${ort_arch}-${ORT_VERSION}.tgz"
   verify /tmp/ort.tgz "$ort_sha"
   tar -xzf /tmp/ort.tgz -C /tmp
-  cp "/tmp/onnxruntime-linux-${ort_arch}-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION}" tools/libonnxruntime.so
+  ort_dir="/tmp/onnxruntime-linux-${ort_arch}-${ORT_VERSION}"
+  cp "$ort_dir/lib/libonnxruntime.so.${ORT_VERSION}" tools/libonnxruntime.so
   curl -fsSL -o /tmp/ffmpeg.tar.xz "${ff_base}/${FFMPEG_NAME}-${ff_arch}.tar.xz"
   verify /tmp/ffmpeg.tar.xz "$ff_sha"
   tar -xJf /tmp/ffmpeg.tar.xz -C /tmp
-  cp "/tmp/${FFMPEG_NAME}-${ff_arch}/bin/ffmpeg" \
-     "/tmp/${FFMPEG_NAME}-${ff_arch}/bin/ffprobe" tools/
+  ff_dir="/tmp/${FFMPEG_NAME}-${ff_arch}"
+  cp "$ff_dir/bin/ffmpeg" "$ff_dir/bin/ffprobe" tools/
 fi
+
+mkdir -p tools/licenses/onnxruntime tools/licenses/ffmpeg
+cp "$ort_dir/LICENSE" "$ort_dir/ThirdPartyNotices.txt" tools/licenses/onnxruntime/
+cp "$ff_dir"/licenses/* tools/licenses/ffmpeg/
+
 ls -la tools

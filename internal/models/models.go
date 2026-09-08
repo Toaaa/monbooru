@@ -100,11 +100,14 @@ type ImageSource struct {
 	Site       string
 	PostID     string // upstream post id as text; "" for a manually-added origin
 	URL        string
-	Commentary string  // artist commentary from this source; "" when none
-	Original   string  // upstream artist source the post declared (usually a URL, newline-joined when several); "" when none
-	Similarity float64 // best similarity-service score a lookup matched this origin with; 0 = exact or manual
-	MD5        string  // md5 the source last claimed; "" when it never claimed one
-	MD5Match   string  // last claimed-md5 vs local-file verdict: "" unknown, "match", "differ"
+	Commentary string // artist commentary from this source; "" when none
+	// CommentaryTranslated is the translation of Commentary the source
+	// published beside it; "" when the source carries only one body.
+	CommentaryTranslated string
+	Original             string  // upstream artist source the post declared (usually a URL, newline-joined when several); "" when none
+	Similarity           float64 // best similarity-service score a lookup matched this origin with; 0 = exact or manual
+	MD5                  string  // md5 the source last claimed; "" when it never claimed one
+	MD5Match             string  // last claimed-md5 vs local-file verdict: "" unknown, "match", "differ"
 	// UpgradeKept is the operator's "keep my file" ruling on this origin.
 	// It hides the upgrade offer until the post claims an md5 it has not
 	// claimed before.
@@ -322,12 +325,14 @@ const (
 	JobTypeTag           = "tag"
 	JobTypeWatcher       = "watcher"
 	JobTypePruneThumbs   = "prune-thumbs"
+	JobTypePruneDirs     = "prune-dirs"
 	JobTypeVacuum        = "vacuum"
 	JobTypeFreeMemory    = "free-memory"
 	JobTypeHashes        = "hashes"
 	JobTypeRelations     = "relations"
 	JobTypeFold          = "fold"
 	JobTypeLookup        = "lookup"
+	JobTypeCheck         = "check"
 )
 
 type JobState struct {

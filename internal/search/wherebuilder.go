@@ -99,9 +99,7 @@ func anyLeaf(expr Expr, pred func(Expr) bool) bool {
 	return !WalkLeaves(expr, func(e Expr) bool { return !pred(e) })
 }
 
-func allLeaves(expr Expr, pred func(Expr) bool) bool {
-	return WalkLeaves(expr, pred)
-}
+func allLeaves(expr Expr, pred func(Expr) bool) bool { return WalkLeaves(expr, pred) }
 
 // isPureTagExpr reports whether expr's data SELECT should pin
 // idx_images_ingested_visible (or _filesize_visible) instead of
@@ -202,6 +200,24 @@ func columnFilterIndexHint(expr Expr, sort string) string {
 		// instead of seeking idx_images_source_type_visible and
 		// temp-sorting every visible row by ingested_at.
 		if strings.ToLower(f.Val) == "none" {
+			return sortHint()
+		}
+	case "source", "upgrade":
+		// The none inverse matches most of a library that has few
+		// origins, so the membership index has nothing to narrow and
+		// the planner falls back on idx_images_missing plus a temp
+		// sort. Its anti-join probe rides a covering index, so walking
+		// the sort key and testing per row is the cheaper shape. A site
+		// label seeks idx_image_sources_site and must keep that plan.
+		if strings.ToLower(f.Val) == "none" {
+			return sortHint()
+		}
+	case "lookup":
+		// never is the same anti-join shape over image_lookups. The
+		// other values stay unpinned: off is an OR across two columns
+		// the sort index doesn't carry, so the pinned walk has to fetch
+		// every row and loses to the temp sort it replaces.
+		if strings.ToLower(f.Val) == "never" {
 			return sortHint()
 		}
 	}
@@ -1025,22 +1041,36 @@ var filterBuilders = map[string]func(*whereBuilder, FilterExpr) string{
 	"ai":         (*whereBuilder).buildAIFilter,
 	"source":     (*whereBuilder).buildSourceFilter,
 	"cat":        (*whereBuilder).buildCatFilter,
-	"width":      (*whereBuilder).buildWidthFilter,
-	"height":     (*whereBuilder).buildHeightFilter,
+	"width":      comp("i.width %s ?", parseIntValue, parseIntComp),
+	"height":     comp("i.height %s ?", parseIntValue, parseIntComp),
 	"date":       func(b *whereBuilder, e FilterExpr) string { return b.buildDateFilter(e.Val) },
 	"missing":    (*whereBuilder).buildMissingFilter,
 	"type":       (*whereBuilder).buildTypeFilter,
 	"collection": (*whereBuilder).buildCollectionFilter,
-	"pages":      (*whereBuilder).buildPagesFilter,
-	"name":       (*whereBuilder).buildNameFilter,
-	"size":       (*whereBuilder).buildSizeFilter,
-	"mime":       (*whereBuilder).buildMimeFilter,
-	"ratio":      (*whereBuilder).buildRatioFilter,
-	"tagcount":   (*whereBuilder).buildTagcountFilter,
-	"duration":   (*whereBuilder).buildDurationFilter,
+	// COALESCE so non-manga rows (NULL page_count) compare as 0; matches
+	// the contract that `pages:>=1` excludes images.
+	"pages": comp("COALESCE(i.page_count, 0) %s ?", parseIntValue, parseIntComp),
+	"name":  (*whereBuilder).buildNameFilter,
+	"size":  comp("i.file_size %s ?", parseSizeValueAny, parseSizeComp),
+	"mime":  (*whereBuilder).buildMimeFilter,
+	// Width and height are nullable on edge cases (a cbz cover that failed
+	// to decode); NULLIF guards the divide so the row drops out instead of
+	// erroring.
+	"ratio": comp("(CAST(i.width AS REAL) / NULLIF(i.height, 0)) %s ?", parseFloatValue, parseFloatComp),
+	// images.tag_count is a stored column maintained by triggers on
+	// image_tags (db.Bootstrap). The indexed range seek over
+	// idx_images_tag_count_visible is one primary-table read per visible
+	// row.
+	"tagcount": comp("i.tag_count %s ?", parseIntValue, parseIntComp),
+	// NULL duration_seconds (non-videos and pre-migration rows) drops out of
+	// any comparison via the IS NOT NULL guard; the COALESCE form pages:
+	// uses would force them into "0 seconds" matches, which silently
+	// advertises every image as a 0-second clip.
+	"duration":   comp("(i.duration_seconds IS NOT NULL AND i.duration_seconds %s ?)", parseFloatValue, parseFloatComp),
 	"hash":       (*whereBuilder).buildHashFilter,
 	"md5":        (*whereBuilder).buildMD5Filter,
 	"id":         (*whereBuilder).buildIDFilter,
+	"batch":      (*whereBuilder).buildBatchFilter,
 	"phash":      (*whereBuilder).buildPhashFilter,
 	"relation":   (*whereBuilder).buildRelationFilter,
 	"similar":    (*whereBuilder).buildSimilarFilter,
@@ -1060,6 +1090,14 @@ var filterBuilders = map[string]func(*whereBuilder, FilterExpr) string{
 	"upgrade":    (*whereBuilder).buildUpgradeFilter,
 }
 
+// comp is the dispatch entry for a numeric range filter: every one of
+// them differs only in the column it compares and how the value parses.
+func comp(sqlTemplate string, parseVal func(string) (any, bool), parseComp func(string) (string, any, bool)) func(*whereBuilder, FilterExpr) string {
+	return func(b *whereBuilder, e FilterExpr) string {
+		return b.buildCompFilter(sqlTemplate, e.Val, parseVal, parseComp)
+	}
+}
+
 func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 	if h, ok := filterBuilders[e.Key]; ok {
 		return h(b, e)
@@ -1070,9 +1108,7 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 // buildSystemFilter is the autocomplete-only cheat-sheet trigger; a
 // bare `system:` query must not fall into buildDefaultFilter's
 // match-all branch.
-func (b *whereBuilder) buildSystemFilter(_ FilterExpr) string {
-	return "1=0"
-}
+func (b *whereBuilder) buildSystemFilter(_ FilterExpr) string { return "1=0" }
 
 // boolColumnFilter parses a bool from val and returns "col = 1" /
 // "col = 0", or "1=0" on a parse failure (no row matches, so the
@@ -1111,6 +1147,11 @@ func (b *whereBuilder) buildAIFilter(e FilterExpr) string {
 		val = "a1111"
 	}
 	if val == "any" {
+		// Spelled out rather than bound so the seek keeps the index, which
+		// makes this list one of the two places a new models.SourceType* has
+		// to be added by hand. The other is searchkw's `ai` entry, which
+		// spells the values again for the cheat sheet - neither mirror is
+		// reachable by grepping the constants.
 		return "(i.source_type = 'a1111' OR i.source_type = 'comfyui' OR i.source_type = 'a1111,comfyui')"
 	}
 	if val == "none" {
@@ -1134,7 +1175,7 @@ func (b *whereBuilder) buildAIFilter(e FilterExpr) string {
 func (b *whereBuilder) buildSourceFilter(e FilterExpr) string {
 	switch strings.ToLower(e.Val) {
 	case "", "none":
-		return b.imageIDExists("image_sources s", "s", "", true)
+		return "i.id NOT IN (SELECT image_id FROM image_sources)"
 	case "any":
 		return "i.id IN (SELECT image_id FROM image_sources)"
 	}
@@ -1145,14 +1186,6 @@ func (b *whereBuilder) buildSourceFilter(e FilterExpr) string {
 func (b *whereBuilder) buildCatFilter(e FilterExpr) string {
 	b.args = append(b.args, e.Val)
 	return b.imageIDExists("image_tags it JOIN tags t ON it.tag_id = t.id JOIN tag_categories tc ON tc.id = t.category_id", "it", "tc.name = ?", false)
-}
-
-func (b *whereBuilder) buildWidthFilter(e FilterExpr) string {
-	return b.buildCompFilter("i.width %s ?", e.Val, parseIntValue, parseIntComp)
-}
-
-func (b *whereBuilder) buildHeightFilter(e FilterExpr) string {
-	return b.buildCompFilter("i.height %s ?", e.Val, parseIntValue, parseIntComp)
 }
 
 // buildMissingFilter sets a flag so any explicit `missing:` opts out
@@ -1221,12 +1254,6 @@ func (b *whereBuilder) buildCollectionFilter(e FilterExpr) string {
 	return "i.id IN (SELECT image_id FROM image_collections WHERE name = ?)"
 }
 
-// COALESCE so non-manga rows (NULL page_count) compare as 0; matches
-// the contract that `pages:>=1` excludes images.
-func (b *whereBuilder) buildPagesFilter(e FilterExpr) string {
-	return b.buildCompFilter("COALESCE(i.page_count, 0) %s ?", e.Val, parseIntValue, parseIntComp)
-}
-
 // buildNameFilter does substring match against the filename segment
 // after the last "/", so a folder named "vacation" doesn't match every
 // file inside it. Empty value matches nothing (a bare `name:` is
@@ -1271,10 +1298,6 @@ func (b *whereBuilder) buildNameFilter(e FilterExpr) string {
 		`OR EXISTS (SELECT 1 FROM image_paths ip INDEXED BY idx_image_paths_aliases WHERE ip.image_id = i.id AND ip.is_canonical = 0 AND ip.basename_lower LIKE ? ESCAPE '\'))`
 }
 
-func (b *whereBuilder) buildSizeFilter(e FilterExpr) string {
-	return b.buildCompFilter("i.file_size %s ?", e.Val, parseSizeValueAny, parseSizeComp)
-}
-
 // buildMimeFilter accepts either the bare file_type bucket ("png") or
 // the `image/png` / `video/webm` form. Anything else falls through to
 // the empty result. Multiple values comma-separated like `mime:png,jpeg`
@@ -1297,29 +1320,6 @@ func (b *whereBuilder) buildMimeFilter(e FilterExpr) string {
 		}
 	}
 	return fileTypeInClause(seen, nil)
-}
-
-// Width and height are nullable on edge cases (a cbz cover that failed
-// to decode); NULLIF guards the divide so the row drops out instead of
-// erroring.
-func (b *whereBuilder) buildRatioFilter(e FilterExpr) string {
-	return b.buildCompFilter("(CAST(i.width AS REAL) / NULLIF(i.height, 0)) %s ?", e.Val, parseFloatValue, parseFloatComp)
-}
-
-// images.tag_count is a stored column maintained by triggers on
-// image_tags (db.Bootstrap). The indexed range seek over
-// idx_images_tag_count_visible is one primary-table read per visible
-// row.
-func (b *whereBuilder) buildTagcountFilter(e FilterExpr) string {
-	return b.buildCompFilter("i.tag_count %s ?", e.Val, parseIntValue, parseIntComp)
-}
-
-// NULL duration_seconds (non-videos and pre-migration rows) drops out of
-// any comparison via the IS NOT NULL guard; the COALESCE form pages:
-// uses would force them into "0 seconds" matches, which silently
-// advertises every image as a 0-second clip.
-func (b *whereBuilder) buildDurationFilter(e FilterExpr) string {
-	return b.buildCompFilter("(i.duration_seconds IS NOT NULL AND i.duration_seconds %s ?)", e.Val, parseFloatValue, parseFloatComp)
 }
 
 // buildHashFilter dispatches on digest length so pasting either stored
@@ -1377,6 +1377,18 @@ func (b *whereBuilder) buildIDFilter(e FilterExpr) string {
 	return "i.id = ?"
 }
 
+// buildBatchFilter takes one upload batch by the token every row of it
+// carries. Two batches can land in the same minute, so a time range cannot
+// name one of them.
+func (b *whereBuilder) buildBatchFilter(e FilterExpr) string {
+	n, err := strconv.ParseInt(strings.TrimSpace(e.Val), 10, 64)
+	if err != nil {
+		return "1=0"
+	}
+	b.args = append(b.args, n)
+	return "i.upload_batch = ?"
+}
+
 // buildPromptFilter is substring match across both SD and ComfyUI
 // metadata tables; either is enough for the row to qualify. Mirrors
 // the generated: filter's UNION-of-tables shape.
@@ -1420,23 +1432,50 @@ func (b *whereBuilder) buildViaFilter(e FilterExpr) string {
 	return "i.origin = ? COLLATE NOCASE"
 }
 
+// buildTaggedFilter: the bare form and the booleans are a tag-presence
+// test over image_tags, so implied rows count. A name is a source
+// filter and goes to the ledger instead.
 func (b *whereBuilder) buildTaggedFilter(e FilterExpr) string {
+	if e.Val == "" {
+		return b.imageTagsPredicate("", false)
+	}
 	return b.boolTagsPredicate("", e.Val)
 }
 
 func (b *whereBuilder) buildAutotaggedFilter(e FilterExpr) string {
+	if e.Val == "" {
+		return b.imageTagsPredicate("it.is_auto = 1", false)
+	}
 	return b.boolTagsPredicate("it.is_auto = 1", e.Val)
 }
 
 // boolTagsPredicate answers a has-any-such-tag filter: true matches
 // images carrying a row the extra predicate selects, false their
-// complement.
+// complement. A non-boolean value names a source and falls through to
+// the provenance ledger.
 func (b *whereBuilder) boolTagsPredicate(extra, val string) string {
 	v, ok := parseBoolVal(val)
 	if !ok {
-		return "1=0"
+		b.args = append(b.args, val)
+		return b.sourceLedgerPredicate(extra)
 	}
 	return b.imageTagsPredicate(extra, !v)
+}
+
+// sourceLedgerPredicate matches images carrying a tag the named source
+// applied or re-confirmed. image_tags.tagger_name keeps only the first
+// applier, so a danbooru tag later re-confirmed by ptr answers both
+// only off image_tag_sources; implied fan-out records no ledger row, so
+// the reserved 'user' source stays anonymous adds alone. extra
+// constrains the image_tags side: a source that only re-confirmed a
+// manual row answers tagged: but never autotagged:.
+func (b *whereBuilder) sourceLedgerPredicate(extra string) string {
+	if extra == "" {
+		return b.imageIDExists("image_tag_sources s", "s", "s.source = ? COLLATE NOCASE", false)
+	}
+	return b.imageIDExists(
+		"image_tag_sources s JOIN image_tags it ON it.image_id = s.image_id AND it.tag_id = s.tag_id",
+		"s", extra+" AND s.source = ? COLLATE NOCASE", false)
 }
 
 // buildLookupFilter matches on the scheduled hash lookup's per-image state.

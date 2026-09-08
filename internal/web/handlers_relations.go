@@ -38,7 +38,7 @@ func (s *Server) relatedEntriesGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.DB == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
@@ -161,8 +161,8 @@ func flattenRelationsForPanel(rels *relations.ImageRelations, self int64) []rela
 	if rels.VersionChild != nil {
 		add(relatedTile{ID: *rels.VersionChild, Marker: "Newer", Label: "newer version"})
 	}
-	if rels.DerivativeSource != nil {
-		add(relatedTile{ID: *rels.DerivativeSource, Marker: "Source", Label: "source"})
+	for _, m := range rels.DerivativeSources {
+		add(relatedTile{ID: m, Marker: "Source", Label: "source"})
 	}
 	for _, m := range rels.Derivatives {
 		add(relatedTile{ID: m, Marker: "Derivative", Label: "derivative"})
@@ -174,8 +174,9 @@ func flattenRelationsForPanel(rels *relations.ImageRelations, self int64) []rela
 // grid analogue of /images/{id}/pages: per-type sections, each a
 // thumbnail strip the operator can click through.
 func (s *Server) imageRelationsPage(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
-	if !ok {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		s.notFoundHandler(w, r)
 		return
 	}
 	cx, ok := s.requireActive(w)
@@ -184,7 +185,7 @@ func (s *Server) imageRelationsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	img, err := loadImage(r.Context(), cx.DB, id)
 	if err != nil {
-		http.NotFound(w, r)
+		s.notFoundHandler(w, r)
 		return
 	}
 	rels, err := relations.LoadImageRelations(cx.DB, id)
@@ -262,12 +263,12 @@ func (s *Server) imageRelationsPage(w http.ResponseWriter, r *http.Request) {
 		pageData.VersionChainGens = gens
 		pageData.VersionActions = versionActionMap(id, rels)
 	}
-	if rels.DerivativeSource != nil || len(rels.Derivatives) > 0 {
-		treeRows, tErr := derivativeTreeRowsForImage(cx, id)
+	if len(rels.DerivativeSources) > 0 || len(rels.Derivatives) > 0 {
+		graph, tErr := derivativeGraphForImage(cx, id)
 		if tErr != nil {
-			logx.Warnf("relations page derivative tree %d: %v", id, tErr)
+			logx.Warnf("relations page derivative graph %d: %v", id, tErr)
 		}
-		pageData.DerivativeTreeRows = treeRows
+		pageData.DerivativeGraph = graph
 		pageData.DerivativeActions = derivativeActionMap(id, rels)
 	}
 	s.renderTemplate(w, "relations_image.html", pageData)
@@ -279,22 +280,11 @@ func (s *Server) imageRelationsPage(w http.ResponseWriter, r *http.Request) {
 // cell - the same lead-with-self framing the version chain and
 // derivative tree already apply via the relations-tree-current accent.
 func reorderSelfFirst(members []int64, self int64) []int64 {
-	if len(members) == 0 {
-		return members
+	if !slices.Contains(members, self) {
+		return slices.Clone(members)
 	}
-	out := make([]int64, 0, len(members))
-	hasSelf := false
-	for _, m := range members {
-		if m == self {
-			hasSelf = true
-		} else {
-			out = append(out, m)
-		}
-	}
-	if hasSelf {
-		return append([]int64{self}, out...)
-	}
-	return out
+	rest := slices.DeleteFunc(slices.Clone(members), func(m int64) bool { return m == self })
+	return append([]int64{self}, rest...)
 }
 
 // relationRoot is the top of the parentCol -> childCol chain above start,
@@ -345,52 +335,27 @@ func versionChainGensForImage(cx *galleryCtx, imageID int64) ([][]int64, error) 
 	return gens, nil
 }
 
-// derivativeTreeRowsForImage walks up from imageID via the derivative
-// source link to the tree root and DFSes down, returning each tree
-// node tagged with its depth and the trunk segments the template
-// renders as CSS-drawn branch lines. Same depth budget as the version
-// chain walk for safety.
-func derivativeTreeRowsForImage(cx *galleryCtx, imageID int64) ([]treeRow, error) {
-	root, err := relationRoot(cx, "derivative_edges", "source_image_id", "derivative_image_id", imageID)
-	if err != nil {
+// derivativeGraphForImage lays out the derivative component around
+// imageID for drawing: one row per generation, every image drawn once,
+// and one line per edge. It reads the component's edges into memory
+// first - the component is bounded by the depth cap, and the layout
+// needs every edge at once to place a node under the deepest of its
+// sources.
+func derivativeGraphForImage(cx *galleryCtx, imageID int64) (*derivGraph, error) {
+	members, err := relations.DerivativeComponent(cx.DB.Read, imageID)
+	if err != nil || len(members) < 2 {
 		return nil, err
 	}
-	rows := []treeRow{{ID: root, Depth: 0}}
-	if err := dfsDerivativeChildren(cx, root, 1, nil, &rows); err != nil {
-		return nil, err
-	}
-	if len(rows) <= 1 {
-		return nil, nil
-	}
-	return rows, nil
-}
-
-// dfsDerivativeChildren appends each derivative of `parent` (and the
-// subtree below each) to rows in DFS order. ancestorTrunks carries
-// the line/empty pattern from the root toward `parent`; the function
-// appends a connector (tee or elbow) per child so the template can
-// paint each row's branch glyph. Capped at the chain depth constant
-// so a malformed graph can't recurse forever.
-func dfsDerivativeChildren(cx *galleryCtx, parent int64, depth int, ancestorTrunks []string, rows *[]treeRow) error {
-	if depth > relations.MaxVersionChainDepth {
-		return nil
-	}
-	ids, err := db.QueryIDs(cx.DB.Read,
-		`SELECT derivative_image_id FROM derivative_edges WHERE source_image_id = ? ORDER BY derivative_image_id`,
-		parent,
-	)
-	if err != nil {
-		return err
-	}
-	for i, id := range ids {
-		isLast := i == len(ids)-1
-		*rows = append(*rows, treeRow{ID: id, Depth: depth, Trunks: rowTrunks(ancestorTrunks, depth, isLast), Source: parent})
-		childAncestors := extendAncestorTrunks(ancestorTrunks, depth, isLast)
-		if err := dfsDerivativeChildren(cx, id, depth+1, childAncestors, rows); err != nil {
-			return err
+	sourcesOf := map[int64][]int64{}
+	for _, id := range members {
+		srcs, err := db.QueryIDs(cx.DB.Read,
+			`SELECT source_image_id FROM derivative_edges WHERE derivative_image_id = ? ORDER BY source_image_id`, id)
+		if err != nil {
+			return nil, err
 		}
+		sourcesOf[id] = srcs
 	}
-	return nil
+	return layOutDerivatives(members, sourcesOf), nil
 }
 
 // collectionWithSelf splices the anchor image into the sibling list at
@@ -451,15 +416,13 @@ type relationsImagePageData struct {
 	// one-image-per-generation, root first. Nil when the image is not
 	// in any version chain.
 	VersionChainGens [][]int64
-	// DerivativeTreeRows flattens the derivative tree containing the
-	// current image in DFS order, each row tagged with its depth so
-	// the template can indent children under their parent and the
-	// branching is visible. Nil when the image has no derivative
-	// edges.
-	DerivativeTreeRows []treeRow
+	// DerivativeGraph is the derivative component containing the
+	// image, laid out in generations with every edge as a line. Nil
+	// when the image sits on no derivative edge.
+	DerivativeGraph *derivGraph
 	// DerivativeActions maps a tree node id to the inline-action label
 	// the template should paint next to its thumb: "this" for the
-	// current image, "source" for the current image's declared source,
+	// current image, "source" for each image it is based on,
 	// "derivative" for each direct derivative of the current image.
 	// Tree nodes that are neither (ancestors past the source, siblings,
 	// or descendants past the direct derivatives) are absent so the
@@ -480,13 +443,13 @@ type relationsImagePageData struct {
 
 // derivativeActionMap returns the per-row inline-action label for the
 // derivative-section of /images/{id}/relations: "this" for the current
-// image, "source" for its declared source, "derivative" for each direct
-// derivative. Tree nodes the operator can't act on from the current
-// image's vantage are absent from the map.
+// image, "source" for each image it is based on, "derivative" for each
+// direct derivative. Tree nodes the operator can't act on from the
+// current image's vantage are absent from the map.
 func derivativeActionMap(self int64, rels *relations.ImageRelations) map[int64]string {
 	m := map[int64]string{self: "this"}
-	if rels.DerivativeSource != nil {
-		m[*rels.DerivativeSource] = "source"
+	for _, s := range rels.DerivativeSources {
+		m[s] = "source"
 	}
 	for _, d := range rels.Derivatives {
 		m[d] = "derivative"
@@ -540,7 +503,7 @@ func (s *Server) relationsForm(w http.ResponseWriter, r *http.Request) (*gallery
 	if !parseFormOK(w, r) {
 		return nil, false
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.RelationsSvc == nil {
 		http.Error(w, "no gallery", http.StatusServiceUnavailable)
 		return nil, false
@@ -596,15 +559,6 @@ func (s *Server) addRelationPost(w http.ResponseWriter, r *http.Request) {
 		}
 		err = cx.RelationsSvc.AddVersionEdge(a, b)
 	case "derivative":
-		if force {
-			// Same reasoning as version: the schema allows only one
-			// source per derivative; drop the existing row so the new
-			// source can attach.
-			if cErr := cx.RelationsSvc.ClearDerivativeSourceOf(b); cErr != nil {
-				writeRelationError(w, cErr)
-				return
-			}
-		}
 		err = cx.RelationsSvc.AddDerivativeEdge(a, b)
 	case "not_related":
 		err = cx.RelationsSvc.AddNotRelated(a, b)
@@ -785,38 +739,18 @@ func reviewAgainPost(w http.ResponseWriter, r *http.Request, cx *galleryCtx) {
 		flashStatus(w, http.StatusBadRequest, "Unknown review-again kind.")
 		return
 	}
-	// not_related_pairs is keyed (a,b) without canonical ordering;
-	// the existing AddNotRelated normalises before insert but the
-	// row could carry either orientation. Sweep both directions to
-	// avoid leaving a skipper row alive that would keep the pair
-	// out of the queue after find-pairs runs.
-	if _, err := cx.DB.Write.Exec(
-		`DELETE FROM not_related_pairs WHERE (a_image_id = ? AND b_image_id = ?) OR (a_image_id = ? AND b_image_id = ?)`,
-		a, b, b, a,
-	); err != nil {
+	if err := cx.RelationsSvc.RemoveNotRelated(a, b); err != nil {
 		writeRelationError(w, err)
 		return
 	}
-	// potential_relation_pairs canonicalises (min, max). INSERT OR
-	// IGNORE keeps any pre-existing queue row alive at its real
-	// distance; the session is pinned to this pair via the redirect
-	// below regardless of where it would otherwise sort.
-	lo, hi := a, b
-	if lo > hi {
-		lo, hi = hi, lo
-	}
-	// source='review' rather than a detector: the operator asking to see
-	// the pair again is its whole provenance, and claiming a phash match
-	// that never happened would misread on the session card.
-	if _, err := cx.DB.Write.Exec(
-		`INSERT OR IGNORE INTO potential_relation_pairs (a_image_id, b_image_id, distance, created_at, source)
-		 VALUES (?, ?, 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
-		lo, hi, relations.SourceReview,
-	); err != nil {
+	if err := cx.RelationsSvc.QueueForReview(a, b); err != nil {
 		writeRelationError(w, err)
 		return
 	}
 	cx.InvalidateCaches()
+	// The redirect pins the session to this exact pair, so it opens on the
+	// one the operator clicked wherever the queue would otherwise sort it.
+	lo, hi := min(a, b), max(a, b)
 	dest := "/relations/session?a=" + strconv.FormatInt(lo, 10) + "&b=" + strconv.FormatInt(hi, 10)
 	hxRedirect(w, r, dest)
 }

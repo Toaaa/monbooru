@@ -7,6 +7,7 @@
           hx-delete="/tags/{{$.Parent.ID}}/implications/group?origin={{urlQ .Origin}}&stale={{if .Stale}}1{{else}}0{{end}}"
           hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
           hx-confirm="Remove all {{len .Implications}} {{if .Stale}}stale {{end}}implications added by {{originLabel $.OriginKinds .Origin}}?"
+          data-confirm-danger="Nothing records which tags they implied."
           data-confirm-ok="Remove"
           hx-on::after-request="if(event.detail.successful){pruneRelationGroup(this)}"
           title="Remove every implication in this group">[×]</button>{{end}}</p>{{end}}

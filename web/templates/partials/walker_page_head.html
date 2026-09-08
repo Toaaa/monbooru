@@ -1,7 +1,3 @@
-{{/* The chrome both duplicate walkers wear: the Relations back-link, the
-     page title, the delete-all toolbar and the flash slot. Kind picks
-     which walker's copy and action it is - the two pages differ in their
-     table and nothing else. */}}
 {{define "walker_page_head"}}
 {{template "layout_head" .}}
 <div id="sidebar-inner"></div>
@@ -17,9 +13,9 @@
     {{if .HasRows}}
     <div class="detail-topbar-right">
       {{if eq .Kind "sha256"}}
-      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/file-duplicates/remove" "Confirm" "Remove every non-canonical duplicate file and its bytes from disk? The canonical path stays." "ConfirmOK" "Remove all" "Label" "Delete all duplicate files" "All" true)}}
+      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/file-duplicates/remove" "Confirm" "Remove every non-canonical duplicate file?" "ConfirmDanger" "Their bytes are removed from disk. The canonical path stays." "ConfirmOK" "Remove all" "Label" "Delete all duplicate files" "All" true)}}
       {{else}}
-      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/duplicates/marked/delete-all" "Target" "#flash-walker-marked" "Confirm" "Delete every non-original member of every duplicate-image group? Files are removed from disk." "ConfirmOK" "Delete all" "Label" "Delete all duplicate images")}}
+      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/duplicates/marked/delete-all" "Target" "#flash-walker-marked" "Confirm" "Delete every non-original member of every duplicate-image group?" "ConfirmDanger" "Their files are removed from disk. This cannot be undone." "ConfirmOK" "Delete all" "Label" "Delete all duplicate images")}}
       {{end}}
     </div>
     {{end}}

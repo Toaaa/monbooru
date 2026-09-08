@@ -66,13 +66,13 @@ func (s *Server) pluginRows() []pluginRowView {
 			Enabled:   p.Enabled,
 		}
 		if p.PeerToken != "" {
-			row.Conn = peerConn(p.Paused, s.pluginProbeSeed(p.Name).conn)
+			row.Conn = peerConn(p.Paused, s.peers.ProbeSeed(p.Name).Conn)
 			row.TokenName, row.Scopes = s.pairedTokenInfo(p.Name)
 			row.Paired = true
 		}
 		if p.Installed {
 			row.Command = commandLine(p)
-			row.RunState = s.pluginSupervisor.State(p.Name)
+			row.RunState = s.peers.State(p.Name)
 			managed = append(managed, row)
 			continue
 		}
@@ -94,7 +94,7 @@ func (s *Server) pluginRows() []pluginRowView {
 // monloaderRow is the companion's row: the footer light's state plus the two
 // URLs the old Monloader section carried.
 func (s *Server) monloaderRow() pluginRowView {
-	conn, version, _, _, _ := s.monloaderStatusSeed()
+	ml := s.mlStatus.Seed()
 	s.cfgMu.RLock()
 	apiURL, webURL := s.cfg.Monloader.APIURL, s.cfg.Server.MonloaderURL
 	paused := s.cfg.Monloader.Paused
@@ -102,9 +102,9 @@ func (s *Server) monloaderRow() pluginRowView {
 	name, scopes := s.pairedTokenInfo(monloaderApp)
 	return pluginRowView{
 		Name:       monloaderApp,
-		Version:    version,
+		Version:    ml.Version,
 		Address:    s.monloaderAPIBase(),
-		Conn:       peerConn(paused, conn),
+		Conn:       peerConn(paused, ml.Conn),
 		TokenName:  name,
 		Scopes:     scopes,
 		Paused:     paused,
@@ -119,7 +119,7 @@ func (s *Server) monloaderRow() pluginRowView {
 // commandLine renders a managed plugin's launch line as its manifest names
 // it, for the read-only row.
 func commandLine(p effectivePlugin) string {
-	return strings.TrimSpace(p.Command + " " + strings.Join(p.Args, " "))
+	return strings.TrimSpace(p.Launch.Command + " " + strings.Join(p.Launch.Args, " "))
 }
 
 // peerConn maps a pause flag and a cached probe onto the dot the row shows.
@@ -145,7 +145,7 @@ func (s *Server) pairedTokenInfo(app string) (string, []string) {
 // pluginVersion is what a row shows: the last health probe's answer when the
 // peer reports one, else the snapshot taken at pairing.
 func (s *Server) pluginVersion(p config.PluginConfig) string {
-	return cmp.Or(s.pluginProbeSeed(p.Name).version, p.Version)
+	return cmp.Or(s.peers.ProbeSeed(p.Name).Version, p.Version)
 }
 
 // pairedPeerCount is the signal the pending-request poll compares against, so
@@ -215,8 +215,8 @@ func (s *Server) pluginPairRemove(w http.ResponseWriter, r *http.Request) {
 			// with it.
 			if p.Enabled {
 				s.setPluginEnabled(name, false)
-				s.pluginSupervisor.Stop(name)
-				s.markPluginDown(name)
+				s.peers.Stop(name)
+				s.peers.MarkDown(name)
 				s.pairs.dropPending(name)
 			}
 			// And a folder has no far end to go and clean up by hand, so a
@@ -263,8 +263,8 @@ func (s *Server) pluginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if p, ok := s.effective(r.PathValue("name")); ok && p.Installed {
 		s.setPluginEnabled(p.Name, true)
-		s.pluginSupervisor.Start(launchOf(p))
-		s.clearPluginProbe(p.Name)
+		s.peers.Start(p.Launch)
+		s.peers.ClearProbe(p.Name)
 		logx.Infof("plugins: started %s from %s", p.Name, clientIP(r))
 	}
 	s.renderPluginRows(w, r, false)
@@ -278,8 +278,8 @@ func (s *Server) pluginStop(w http.ResponseWriter, r *http.Request) {
 	if p, ok := s.effective(name); ok && p.Installed {
 		s.setPluginEnabled(name, false)
 	}
-	s.pluginSupervisor.Stop(name)
-	s.markPluginDown(name)
+	s.peers.Stop(name)
+	s.peers.MarkDown(name)
 	logx.Infof("plugins: stopped %s from %s", name, clientIP(r))
 	s.renderPluginRows(w, r, false)
 }
@@ -336,7 +336,7 @@ func (s *Server) teardownPluginPairing(name string) error {
 	if err := s.removePairing(name); err != nil {
 		logx.Errorf("pairing: remove %s failed: %v", name, err)
 	}
-	s.clearPluginProbe(name)
+	s.peers.ClearProbe(name)
 	notifyErr := notifyPeerTeardown(name, base, token)
 	if notifyErr != nil {
 		// The local half is already gone; the call is a courtesy so the peer

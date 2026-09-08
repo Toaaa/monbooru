@@ -45,7 +45,7 @@ func (s *Service) CreateAliasFrom(name string, categoryID, canonicalID int64, or
 	// name to the locked vocabulary or upgrade a canonical row in place.
 	// Pointing at one from another category is fine.
 	if s.ratingCatID != 0 && categoryID == s.ratingCatID {
-		return nil, ErrRatingTagImmutable
+		return nil, ErrRatingCategoryClosed
 	}
 
 	var resultID int64
@@ -267,9 +267,9 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 		// declared implied children, and a later removeTagFromImageTx walk
 		// on that parent has no is_implied=1 rows to sweep. The closure is
 		// invariant inside the merge tx, so resolve it once instead of
-		// rewalking transitiveImpliedTx per image.
+		// rewalking TransitiveImpliedTx per image.
 		if len(newCarrierIDs) > 0 {
-			impliedClosure, err := transitiveImpliedTx(tx, []int64{canonicalID})
+			impliedClosure, err := TransitiveImpliedTx(tx, []int64{canonicalID})
 			if err != nil {
 				return fmt.Errorf("merge resolve canonical closure: %w", err)
 			}
@@ -282,7 +282,7 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 				// and means a merge can only raise a level, never expose an
 				// image the ceiling was hiding.
 				if ratingTarget {
-					if err := pruneLowerRatingsTx(tx, s.ratingCatID, imageID); err != nil {
+					if err := PruneLowerRatingsTx(tx, s.ratingCatID, imageID); err != nil {
 						return fmt.Errorf("merge prune ratings on image %d: %w", imageID, err)
 					}
 				}

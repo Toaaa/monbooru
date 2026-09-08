@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/monbooru/monbooru/internal/config"
 	"github.com/monbooru/monbooru/internal/logx"
@@ -40,7 +39,7 @@ func (s *Server) categoriesHandler(w http.ResponseWriter, r *http.Request) {
 // dialog so each category label renders in its own colour. Database
 // errors yield an empty map so the dialog still renders without colour.
 func (s *Server) categoryColors() map[string]string {
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		return nil
 	}
@@ -149,9 +148,8 @@ func (s *Server) renameCategoryPost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	newName := strings.TrimSpace(r.FormValue("name"))
-	if newName == "" {
-		externalErr(w, r, "Name required.", http.StatusBadRequest)
+	newName, ok := requiredFormExternal(w, r, "name", "Name required.")
+	if !ok {
 		return
 	}
 	if err := s.tagSvc().RenameCategory(id, newName); err != nil {

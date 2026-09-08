@@ -28,9 +28,7 @@ const SimilarMaxTagUsage = relatedMaxTagUsage
 // size, which leaves a tag on half a small library reading as evidence,
 // so the cap follows the library instead; the floor keeps it from
 // rounding to nothing under thirty images.
-func evidenceUsageCap(visible int64) int64 {
-	return min(int64(SimilarMaxTagUsage), max(3, visible/10))
-}
+func evidenceUsageCap(visible int64) int64 { return min(int64(SimilarMaxTagUsage), max(3, visible/10)) }
 
 // categoryWeights scales a tag's rarity by how strongly its namespace
 // identifies the subject. Artist is the one namespace worth a bump:

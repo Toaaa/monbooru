@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
@@ -28,6 +28,46 @@ func (s *Server) ratingCeilingPost(w http.ResponseWriter, r *http.Request) {
 	level := r.URL.Query().Get("level")
 	level = cmp.Or(level, r.FormValue("level"))
 	writeRatingCookie(w, level)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// viewPrefsPost stores how a listing is shown for this browser. A field
+// absent from the request is left alone, so one control cannot clear
+// another's.
+func (s *Server) viewPrefsPost(w http.ResponseWriter, r *http.Request) {
+	if v := r.FormValue("page_size"); v != "" {
+		// "default" drops the override, which is the only way back to a
+		// configured size the select does not offer.
+		age := 31_536_000
+		if v == "default" {
+			v, age = "", -1
+		} else if n, err := strconv.Atoi(v); err != nil || !slices.Contains(PageSizeOptions, n) {
+			http.Error(w, "unknown page size", http.StatusBadRequest)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     pageSizeCookieName,
+			Value:    v,
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   age,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+	if v := r.FormValue("thumb"); v != "" {
+		if v != "s" && v != "m" && v != "l" {
+			http.Error(w, "unknown thumbnail size", http.StatusBadRequest)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     thumbSizeCookieName,
+			Value:    v,
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   31_536_000,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -54,7 +94,7 @@ func (s *Server) toggleBoolColumn(w http.ResponseWriter, r *http.Request, column
 	}
 	// Cached match-id sets keyed off the toggled column (`?q=fav:true`,
 	// `?q=inbox:true`) and the cached inbox count both go stale on flip.
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		cx.InvalidateCaches()
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -91,12 +131,14 @@ func (s *Server) toggleInbox(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-// inboxNavOOB re-renders the topbar inbox link out-of-band so its count
-// follows the toggle; swapping the detail button alone leaves the layout
-// counter stale until the next full render. Mirrors base()'s ceiling-aware
-// InboxCountUnder so the OOB value matches a full render.
+// inboxNavOOB re-renders the topbar inbox count out-of-band so it follows
+// the write; swapping the detail button alone leaves the layout counter
+// stale until the next full render. Only the count span is swapped: the
+// link's own classes carry the nav hue and the active state, and neither
+// is derivable from a POST that carries no search. Mirrors base()'s
+// ceiling-aware InboxCountUnder so the OOB value matches a full render.
 func (s *Server) inboxNavOOB(r *http.Request) string {
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		return ""
 	}
@@ -108,7 +150,7 @@ func (s *Server) inboxNavOOB(r *http.Request) string {
 	if n > 0 {
 		suffix = fmt.Sprintf(" (%d)", n)
 	}
-	return fmt.Sprintf(`<a id="inbox-nav" href="/?q=inbox:true" hx-swap-oob="true">Inbox%s</a>`, suffix)
+	return fmt.Sprintf(`<span id="inbox-nav-count" hx-swap-oob="true">%s</span>`, suffix)
 }
 
 func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +186,7 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 		sortStr = cmp.Or(sortStr, "newest")
 		orderStr := back.Order
 		orderStr = cmp.Or(orderStr, search.DefaultOrder(sortStr))
-		prevID, nextID = s.findAdjacentImages(r.Context(), id, back.Q, sortStr, orderStr, back.Seed, resolveCeiling(r, s.Active()))
+		prevID, nextID = s.findAdjacentImages(r.Context(), id, back.Q, sortStr, orderStr, back.Seed, resolveCeiling(r, s.active()))
 	}
 
 	_, err := gallery.DeleteImage(s.db(), s.galleryPath(), s.thumbnailsPath(), id, tags.RemoveAllTagsFromImageTx, s.onImageDeleteCallback())
@@ -161,7 +203,7 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 		flashStatus(w, http.StatusInternalServerError, "Delete failed; check server log.")
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 
 	redirectURL := ""
 	switch {
@@ -243,37 +285,12 @@ func (s *Server) promoteCanonical(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.promoteCanonicalPath(id, newCanonical,
-		`UPDATE image_paths SET is_canonical = 1 WHERE image_id = ? AND path = ?`, id, newCanonical); err != nil {
+	if err := gallery.PromoteCanonicalByPath(s.db(), s.galleryPath(), id, newCanonical); err != nil {
 		fail(err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.active().InvalidateCaches()
 	hxDone(w, r, "Canonical path updated.", "", fmt.Sprintf("/images/%d", id))
-}
-
-// promoteCanonicalPath demotes every path of the image, promotes the one
-// promoteWhere selects, and repoints the row at newPath. folder_path
-// travels with it and the caches drop: promoting a path in another
-// folder moves the image for folder:/folderonly: search and the cached
-// folder tree.
-func (s *Server) promoteCanonicalPath(imageID int64, newPath, promoteSQL string, promoteArgs ...any) error {
-	newFolder := gallery.FolderPath(s.galleryPath(), newPath)
-	if err := db.InWriteTx(s.db().Write, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`UPDATE image_paths SET is_canonical = 0 WHERE image_id = ?`, imageID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(promoteSQL, promoteArgs...); err != nil {
-			return err
-		}
-		_, err := tx.Exec(
-			`UPDATE images SET canonical_path = ?, folder_path = ? WHERE id = ?`,
-			newPath, newFolder, imageID)
-		return err
-	}); err != nil {
-		return err
-	}
-	s.Active().InvalidateCaches()
-	return nil
 }
 
 const (
@@ -330,8 +347,7 @@ func (s *Server) setSource(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.Active().InvalidateCaches()
-	hxDone(w, r, "Source updated.", "", "/images/"+strconv.FormatInt(id, 10))
+	s.imageEditDone(w, r, id, "Source updated.")
 }
 
 // sourceMembershipAction is the shared skeleton for the origin-row edit
@@ -344,12 +360,7 @@ func (s *Server) sourceMembershipAction(w http.ResponseWriter, r *http.Request, 
 	}
 	site := strings.TrimSpace(r.FormValue("site"))
 	postID := strings.TrimSpace(r.FormValue("post_id"))
-	if err := action(id, site, postID); err != nil {
-		externalErr(w, r, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.Active().InvalidateCaches()
-	hxDone(w, r, successMsg, "", "/images/"+strconv.FormatInt(id, 10))
+	s.applyImageEdit(w, r, id, successMsg, func() error { return action(id, site, postID) })
 }
 
 // removeSource drops one origin from an image, keyed by its site + post id.
@@ -392,18 +403,17 @@ func (s *Server) fetchSource(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	url := strings.TrimSpace(r.FormValue("url"))
-	if url == "" {
-		externalErr(w, r, "this source has no url to fetch", http.StatusBadRequest)
+	url, ok := requiredFormExternal(w, r, "url", "this source has no url to fetch")
+	if !ok {
 		return
 	}
-	// The route bypasses ContextMiddleware so the outbound call below never
-	// runs under ctxMu (a hanging monloader would stall a gallery switch);
-	// snapshot the active name instead.
+	// The route is gallery-free so the outbound call below never runs under
+	// ctxMu (a hanging monloader would stall a gallery switch); snapshot the
+	// active name instead.
 	galleryName := s.activeGallery()
-	s.recordFetchStatus(galleryName, id, "pending", "")
-	if err := s.EnqueueMetadataFetch(r.Context(), id, galleryName, url); err != nil {
-		s.clearFetchStatus(galleryName, id)
+	s.fetchStatus.record(galleryName, id, "pending", "")
+	if err := s.enqueueMetadataFetch(r.Context(), id, galleryName, url); err != nil {
+		s.fetchStatus.clear(galleryName, id)
 		externalErr(w, r, "could not reach monloader: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -432,10 +442,10 @@ func (s *Server) lookupImage(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, "unknown lookup backend", http.StatusBadRequest)
 		return
 	}
-	// This route bypasses ContextMiddleware so the outbound call never runs
-	// under ctxMu; snapshot the gallery once so the row read and the enqueue
-	// name can't straddle a concurrent switch.
-	cx := s.Active()
+	// The route is gallery-free so the outbound call never runs under ctxMu;
+	// snapshot the gallery once so the row read and the enqueue name can't
+	// straddle a concurrent switch.
+	cx := s.active()
 	if cx == nil {
 		externalErr(w, r, "no active gallery", http.StatusServiceUnavailable)
 		return
@@ -463,10 +473,10 @@ func (s *Server) lookupImage(w http.ResponseWriter, r *http.Request) {
 	case "booru":
 		hashes = "md5 " + md5
 	}
-	s.recordFetchLookup(galleryName, id, hashes)
-	jobID, err := s.EnqueueHashLookup(r.Context(), id, galleryName, backend, md5, sha, false, false)
+	s.fetchStatus.recordLookup(galleryName, id, hashes)
+	jobID, err := s.enqueueHashLookup(r.Context(), id, galleryName, backend, md5, sha, false, false)
 	if err != nil {
-		s.clearFetchStatus(galleryName, id)
+		s.fetchStatus.clear(galleryName, id)
 		if errors.Is(err, errPTRUnavailable) {
 			externalErr(w, r, err.Error(), http.StatusConflict)
 			return
@@ -497,10 +507,10 @@ func (s *Server) replaceImage(w http.ResponseWriter, r *http.Request) {
 	}
 	site := strings.TrimSpace(r.FormValue("site"))
 	postID := strings.TrimSpace(r.FormValue("post_id"))
-	// This route bypasses ContextMiddleware so the outbound call never runs
-	// under ctxMu; snapshot the gallery once so the row read and the enqueue
-	// name can't straddle a concurrent switch.
-	cx := s.Active()
+	// The route is gallery-free so the outbound call never runs under ctxMu;
+	// snapshot the gallery once so the row read and the enqueue name can't
+	// straddle a concurrent switch.
+	cx := s.active()
 	if cx == nil {
 		externalErr(w, r, "no active gallery", http.StatusServiceUnavailable)
 		return
@@ -518,13 +528,13 @@ func (s *Server) replaceImage(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, "this source's file is not known to differ from the local one", http.StatusConflict)
 		return
 	}
-	if e, ok := s.loadFetchStatus(galleryName, id); ok && e.State == "pending" {
+	if e, ok := s.fetchStatus.load(galleryName, id); ok && e.State == "pending" {
 		externalErr(w, r, "a fetch is already running for this image; wait for it to finish", http.StatusConflict)
 		return
 	}
-	s.recordFetchStatus(galleryName, id, "pending", "")
-	if err := s.EnqueueReplace(r.Context(), id, galleryName, src.URL); err != nil {
-		s.clearFetchStatus(galleryName, id)
+	s.fetchStatus.record(galleryName, id, "pending", "")
+	if err := s.enqueueReplace(r.Context(), id, galleryName, src.URL); err != nil {
+		s.fetchStatus.clear(galleryName, id)
 		externalErr(w, r, "could not reach monloader: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -554,6 +564,23 @@ func imageIDForm(w http.ResponseWriter, r *http.Request) (int64, bool) {
 // to plain http.Error for non-HTMX callers.
 func externalErr(w http.ResponseWriter, r *http.Request, msg string, code int) {
 	hxErr(w, r, msg, msg, code)
+}
+
+// imageEditDone closes a per-image edit: drop what the write invalidated,
+// then answer the swap htmx is waiting for.
+func (s *Server) imageEditDone(w http.ResponseWriter, r *http.Request, id int64, msg string) {
+	s.active().InvalidateCaches()
+	hxDone(w, r, msg, "", "/images/"+strconv.FormatInt(id, 10))
+}
+
+// applyImageEdit is imageEditDone with the write in front of it, for the
+// edits whose only failure is the mutation's own error.
+func (s *Server) applyImageEdit(w http.ResponseWriter, r *http.Request, id int64, msg string, edit func() error) {
+	if err := edit(); err != nil {
+		externalErr(w, r, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.imageEditDone(w, r, id, msg)
 }
 
 // hxErr is externalErr's two-message twin for handlers whose htmx flash
@@ -599,9 +626,8 @@ func (s *Server) setSourceText(w http.ResponseWriter, r *http.Request, field, la
 	if !ok {
 		return
 	}
-	site := strings.TrimSpace(r.FormValue("site"))
-	if site == "" {
-		externalErr(w, r, "source label required", http.StatusBadRequest)
+	site, ok := requiredFormExternal(w, r, "site", "source label required")
+	if !ok {
 		return
 	}
 	val := strings.TrimSpace(r.FormValue(field))
@@ -610,12 +636,7 @@ func (s *Server) setSourceText(w http.ResponseWriter, r *http.Request, field, la
 		return
 	}
 	postID := strings.TrimSpace(r.FormValue("post_id"))
-	if err := setter(id, site, postID, val); err != nil {
-		externalErr(w, r, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.Active().InvalidateCaches()
-	hxDone(w, r, successMsg, "", "/images/"+strconv.FormatInt(id, 10))
+	s.applyImageEdit(w, r, id, successMsg, func() error { return setter(id, site, postID, val) })
 }
 
 // setSourceCommentary sets the artist commentary attributed to one origin. A
@@ -633,6 +654,23 @@ func (s *Server) setSourceCommentary(w http.ResponseWriter, r *http.Request) {
 func (s *Server) removeSourceCommentary(w http.ResponseWriter, r *http.Request) {
 	s.sourceMembershipAction(w, r, "Commentary removed.", func(id int64, site, postID string) error {
 		return gallery.SetSourceCommentary(s.db(), id, site, postID, "")
+	})
+}
+
+// setSourceTranslation sets the translation of one origin's commentary. It is
+// the source's text like the commentary itself, so a re-pull overwrites it.
+func (s *Server) setSourceTranslation(w http.ResponseWriter, r *http.Request) {
+	s.setSourceText(w, r, "commentary_translated", "translation", maxImageCommentaryLen, "Translation updated.",
+		func(id int64, site, postID, val string) error {
+			return gallery.SetSourceCommentaryTranslated(s.db(), id, site, postID, val)
+		})
+}
+
+// removeSourceTranslation clears one origin's commentary translation, leaving
+// the commentary and the origin itself alone.
+func (s *Server) removeSourceTranslation(w http.ResponseWriter, r *http.Request) {
+	s.sourceMembershipAction(w, r, "Translation removed.", func(id int64, site, postID string) error {
+		return gallery.SetSourceCommentaryTranslated(s.db(), id, site, postID, "")
 	})
 }
 
@@ -697,6 +735,7 @@ func (s *Server) setAnnotation(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, fmt.Sprintf("annotation too long (max %d chars)", maxAnnotationBodyLen), http.StatusBadRequest)
 		return
 	}
+	done := "Annotation added."
 	if raw := strings.TrimSpace(r.FormValue("id")); raw != "" {
 		annID, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
@@ -707,12 +746,12 @@ func (s *Server) setAnnotation(w http.ResponseWriter, r *http.Request) {
 			externalErr(w, r, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		done = "Annotation updated."
 	} else if err := gallery.AddManualAnnotation(s.db(), id, x, y, bw, bh, body); err != nil {
 		externalErr(w, r, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.Active().InvalidateCaches()
-	hxDone(w, r, "Annotation updated.", "", "/images/"+strconv.FormatInt(id, 10))
+	s.imageEditDone(w, r, id, done)
 }
 
 // removeAnnotation drops one operator-drawn box by id.
@@ -726,12 +765,7 @@ func (s *Server) removeAnnotation(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, "bad annotation id", http.StatusBadRequest)
 		return
 	}
-	if err := gallery.DeleteAnnotation(s.db(), annID); err != nil {
-		externalErr(w, r, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.Active().InvalidateCaches()
-	hxDone(w, r, "Annotation removed.", "", "/images/"+strconv.FormatInt(id, 10))
+	s.applyImageEdit(w, r, id, "Annotation removed.", func() error { return gallery.DeleteAnnotation(s.db(), annID) })
 }
 
 // previewMarkup renders a dialog's draft body through the renderer the page
@@ -762,9 +796,8 @@ func (s *Server) setCollection(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("collection"))
-	if name == "" {
-		externalErr(w, r, "collection label required", http.StatusBadRequest)
+	name, ok := requiredFormExternal(w, r, "collection", "collection label required")
+	if !ok {
 		return
 	}
 	if len(name) > maxExternalSourceLen {
@@ -794,8 +827,7 @@ func (s *Server) setCollection(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.Active().InvalidateCaches()
-	hxDone(w, r, "Collection updated.", "", "/images/"+strconv.FormatInt(id, 10))
+	s.imageEditDone(w, r, id, "Collection updated.")
 }
 
 // removeCollection drops one membership from an image.
@@ -804,17 +836,11 @@ func (s *Server) removeCollection(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("collection"))
-	if name == "" {
-		externalErr(w, r, "collection label required", http.StatusBadRequest)
+	name, ok := requiredFormExternal(w, r, "collection", "collection label required")
+	if !ok {
 		return
 	}
-	if err := gallery.RemoveCollectionMembership(s.db(), id, name); err != nil {
-		externalErr(w, r, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.Active().InvalidateCaches()
-	hxDone(w, r, "Collection removed.", "", "/images/"+strconv.FormatInt(id, 10))
+	s.applyImageEdit(w, r, id, "Collection removed.", func() error { return gallery.RemoveCollectionMembership(s.db(), id, name) })
 }
 
 func (s *Server) deleteAlias(w http.ResponseWriter, r *http.Request) {
@@ -842,7 +868,7 @@ func (s *Server) deleteAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.db().Write.Exec(`DELETE FROM image_paths WHERE id = ?`, pathID); err != nil {
+	if err := gallery.DeleteAliasPath(s.db(), pathID); err != nil {
 		logx.Warnf("delete alias row %d: %v", pathID, err)
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
@@ -890,12 +916,12 @@ func unlinkUnderGallery(galleryRoot, victim string) error {
 	return nil
 }
 
-// singleImageMoveJob is the shell moveImage and renameImage share. A
+// singleImageMoveJob is the shell the per-image file operation runs in. A
 // `move` job is taken even for one image so the watcher suppression the
 // batch path relies on applies here too; the job is brief and
 // auto-dismisses like any other. op returns the success flash, and
 // answered when it has already written the response body itself.
-func (s *Server) singleImageMoveJob(w http.ResponseWriter, r *http.Request, doneMsg string, op func(id int64) (flash string, answered bool, err error)) {
+func (s *Server) singleImageMoveJob(w http.ResponseWriter, r *http.Request, op func(id int64) (summary string, answered bool, err error)) {
 	id, ok := idAndForm(w, r)
 	if !ok {
 		return
@@ -903,19 +929,21 @@ func (s *Server) singleImageMoveJob(w http.ResponseWriter, r *http.Request, done
 	if !s.startJob(w, models.JobTypeMove) {
 		return
 	}
-	flash, answered, err := op(id)
+	summary, answered, err := op(id)
 	if err != nil {
 		s.jobs.Fail(err.Error())
-		flashStatus(w, http.StatusBadRequest, err.Error())
+		// The dialog stays open on a refusal, so the reason goes to its own
+		// slot rather than only to the job widget behind the backdrop.
+		externalErr(w, r, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.Active().InvalidateCaches()
-	s.jobs.Complete(doneMsg)
+	s.active().InvalidateCaches()
+	s.jobs.Complete(summary)
 	if answered {
 		return
 	}
 	if isHTMXRequest(r) {
-		setFlashHeader(w, flash, "ok", nil)
+		setFlashHeader(w, summary, "ok", nil)
 		w.Header().Set("HX-Redirect", fmt.Sprintf("/images/%d", id))
 		w.WriteHeader(http.StatusOK)
 		return
@@ -923,24 +951,76 @@ func (s *Server) singleImageMoveJob(w http.ResponseWriter, r *http.Request, done
 	http.Redirect(w, r, fmt.Sprintf("/images/%d", id), http.StatusSeeOther)
 }
 
-// moveImage relocates the one image at {id} into the requested folder.
-func (s *Server) moveImage(w http.ResponseWriter, r *http.Request) {
-	targetFolder := strings.TrimSpace(r.FormValue("folder"))
-	tmpl, parseErr := gallery.ParseNameTemplate(targetFolder, gallery.ScopeMove)
-	s.singleImageMoveJob(w, r, "Moved image.", func(id int64) (string, bool, error) {
-		if parseErr != nil {
-			return "", false, parseErr
+// placeImage files the one image at {id}: the posted folder, the posted
+// name, or both. A folder the form does not carry at all leaves the folder
+// alone - what the collections-order tile's inline rename posts - while a
+// present but empty one is the gallery root. That tile also wants the final
+// name back (a collision may have suffixed it), so its shape answers before
+// the shared redirect tail.
+func (s *Server) placeImage(w http.ResponseWriter, r *http.Request) {
+	if !parseFormOK(w, r) {
+		return
+	}
+	rawFolder, wantFolder := strings.TrimSpace(r.FormValue("folder")), r.Form.Has("folder")
+	rawName := strings.TrimSpace(r.FormValue("name"))
+	inline := r.FormValue("inline") == "1"
+	folderTmpl, folderErr := gallery.ParseNameTemplate(rawFolder, gallery.ScopeMove)
+	nameTmpl, nameErr := gallery.ParseNameTemplate(rawName, gallery.ScopeRename)
+
+	s.singleImageMoveJob(w, r, func(id int64) (string, bool, error) {
+		if folderErr != nil {
+			return "", false, folderErr
 		}
-		folder, err := s.singleName(r.Context(), tmpl, targetFolder, id)
+		if nameErr != nil {
+			return "", false, nameErr
+		}
+		var folder, name *string
+		if wantFolder {
+			rendered, err := s.singleName(r.Context(), folderTmpl, rawFolder, id)
+			if err != nil {
+				return "", false, err
+			}
+			folder = &rendered
+		}
+		if nameTmpl != nil {
+			rendered, err := s.singleName(r.Context(), nameTmpl, rawName, id)
+			if err != nil {
+				return "", false, err
+			}
+			name = &rendered
+		}
+		res, err := gallery.PlaceImage(s.db(), s.galleryPath(), id, folder, name)
 		if err != nil {
 			return "", false, err
 		}
-		if _, err := gallery.MoveImage(s.db(), s.galleryPath(), id, folder); err != nil {
-			return "", false, err
+		newBase := filepath.Base(res.NewCanonicalPath)
+		// What happened, not what was filled in: the dialog opens on the
+		// row's own name, so a move submits one without renaming anything.
+		_, _, past := placeVerbs(res.Moved, res.Renamed)
+		summary := fmt.Sprintf("%s image to %s.", titleCase(past), namePath(res.NewFolderPath, newBase))
+		if inline {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(newBase))
+			return summary, true, nil
 		}
-		return fmt.Sprintf("Moved image to %s.", cmp.Or(folder, "gallery root")), false, nil
+		return summary, false, nil
 	})
 }
+
+// placeVerbs names what a file operation actually does, so its progress
+// line and its summary follow the halves the operator filled.
+func placeVerbs(folder, name bool) (verb, gerund, past string) {
+	switch {
+	case folder && name:
+		return "file", "filing", "moved and renamed"
+	case name:
+		return "rename", "renaming", "renamed"
+	default:
+		return "move", "moving", "moved"
+	}
+}
+
+func titleCase(s string) string { return strings.ToUpper(s[:1]) + s[1:] }
 
 // singleName resolves what one image is renamed or moved to: the literal
 // when the template carries no tokens, otherwise the row's own render.
@@ -953,36 +1033,6 @@ func (s *Server) singleName(ctx context.Context, tmpl *gallery.NameTemplate, lit
 		return "", err
 	}
 	return tmpl.Render(facts)
-}
-
-// renameImage renames the one image at {id}'s file in place. The
-// collections-order tile renames inline and wants the final name back
-// (a collision may have suffixed it), so that shape answers before the
-// shared redirect tail.
-func (s *Server) renameImage(w http.ResponseWriter, r *http.Request) {
-	newName := strings.TrimSpace(r.FormValue("name"))
-	inline := r.FormValue("inline") == "1"
-	tmpl, parseErr := gallery.ParseNameTemplate(newName, gallery.ScopeRename)
-	s.singleImageMoveJob(w, r, "Renamed image.", func(id int64) (string, bool, error) {
-		if parseErr != nil {
-			return "", false, parseErr
-		}
-		name, err := s.singleName(r.Context(), tmpl, newName, id)
-		if err != nil {
-			return "", false, err
-		}
-		res, err := gallery.RenameImage(s.db(), s.galleryPath(), id, name)
-		if err != nil {
-			return "", false, err
-		}
-		newBase := filepath.Base(res.NewCanonicalPath)
-		if inline {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte(newBase))
-			return "", true, nil
-		}
-		return fmt.Sprintf("Renamed image to %s.", newBase), false, nil
-	})
 }
 
 // nextPrefix returns the smallest string strictly greater than prefix

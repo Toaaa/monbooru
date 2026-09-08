@@ -88,11 +88,13 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 	}
 
 	meta := &models.ComfyUIMetadata{}
+	nodeIDs := comfyNodeIDs(parsedNodes)
 
 	// First pass: find KSampler to learn which CLIPTextEncode is the
 	// positive prompt.
 	positiveNodeID := ""
-	for _, node := range parsedNodes {
+	for _, id := range nodeIDs {
+		node := parsedNodes[id]
 		nodeType := node.typeName()
 		if nodeType == "KSampler" || nodeType == "KSamplerAdvanced" {
 			if posRaw, ok := node.Inputs["positive"]; ok {
@@ -109,7 +111,8 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 	}
 
 	// Second pass: apply node inputs.
-	for id, node := range parsedNodes {
+	for _, id := range nodeIDs {
+		node := parsedNodes[id]
 		nodeType := node.typeName()
 		// For CLIPTextEncode, only use it as the prompt when it's the
 		// positive reference; otherwise fall back to the first non-empty
@@ -134,7 +137,8 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 
 	// Fallback: PrimitiveStringMultiline as prompt source.
 	if meta.Prompt == "" {
-		for _, node := range parsedNodes {
+		for _, id := range nodeIDs {
+			node := parsedNodes[id]
 			nodeType := node.typeName()
 			if nodeType == "PrimitiveStringMultiline" {
 				if valRaw, ok := node.Inputs["value"]; ok {
@@ -267,9 +271,9 @@ func parseComfyNodesArray(raw json.RawMessage, meta *models.ComfyUIMetadata) {
 }
 
 func parseComfyNodesDict(workflow map[string]json.RawMessage, meta *models.ComfyUIMetadata) {
-	for _, nodeRaw := range workflow {
+	for _, id := range comfyNodeIDs(workflow) {
 		var node comfyNode
-		if err := json.Unmarshal(nodeRaw, &node); err != nil {
+		if err := json.Unmarshal(workflow[id], &node); err != nil {
 			continue
 		}
 		applyComfyNodeInputs(node.Type, node.Inputs, meta, nil)
@@ -382,8 +386,19 @@ func comfyParamToDisplay(name string, raw json.RawMessage) *models.ComfyNodePara
 	return &models.ComfyNodeParam{Name: name, Value: string(raw)}
 }
 
-// sortComfyKeys sorts pure-integer keys numerically first, then the
-// rest lexicographically.
+// comfyNodeIDs is a node map's keys in the order every pass over it walks.
+// The passes are first-writer-wins, and Go randomises map iteration, so
+// without a fixed order one graph yields a different checkpoint, LoRA order
+// and generation hash on every parse.
+func comfyNodeIDs[T any](nodes map[string]T) []string {
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sortComfyKeys(ids)
+	return ids
+}
+
 func sortComfyKeys(keys []string) {
 	slices.SortFunc(keys, func(a, b string) int {
 		ai, bi := parseIntKey(a), parseIntKey(b)

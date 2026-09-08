@@ -1,15 +1,6 @@
-{{/* Shared chrome for the two PTR contribute dialogs. The wrappers in
-     ptr_contrib_dialog.html / tag_ptr_contrib_dialog.html pass the
-     per-surface config; Pairs selects the row rendering (single tag vs
-     A -> B relation). main.js drives both through the same delegated
-     handlers, keyed on the ids and data attributes emitted here. */}}
 
-{{/* Row name: a single colored tag, or an A -> B / A => B pair. */}}
 {{define "ptr_contrib_name"}}{{if .Pairs}}<span class="ptr-name"><span{{if .Row.AColor}} style="color:{{catColor .Row.AColor}}"{{end}}>{{.Row.A}}</span> {{if eq .Row.Kind "sibling"}}-&gt;{{else}}=&gt;{{end}} <span{{if .Row.BColor}} style="color:{{catColor .Row.BColor}}"{{end}}>{{.Row.B}}</span></span>{{else}}<span class="ptr-name"{{if .Row.Color}} style="color:{{catColor .Row.Color}}"{{end}}>{{.Row.Tag}}</span>{{end}}{{end}}
 
-{{/* Context row: a fixed Note, else the row's own note (only the
-     ineligible lists reach that branch, and their row types carry a
-     Note field). */}}
 {{define "ptr_contrib_ctx_row"}}<div class="ptr-row ptr-row-ctx"><span class="ptr-gut"></span><span class="ptr-mark"></span>{{template "ptr_contrib_name" (dict "Pairs" .Pairs "Row" .Row)}}<span class="ptr-note">{{if .Note}}{{.Note}}{{else if .Row.Note}}{{.Row.Note}}{{else}}not eligible{{end}}</span></div>{{end}}
 
 {{define "ptr_contrib_shell"}}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/monbooru/monbooru/internal/config"
+	"github.com/monbooru/monbooru/internal/plugins"
 )
 
 // monloaderApp is the reserved peer name the companion pairs under. It keeps
@@ -23,23 +24,12 @@ const monloaderApp = "monloader"
 var pluginClient = &http.Client{Timeout: 15 * time.Second}
 
 const (
-	// pluginProbeTTL bounds how often a peer's /health is re-checked, so a
-	// settings render never fans out a probe per row per navigation.
-	pluginProbeTTL = 10 * time.Second
 	// pluginProbeInterval is how often the background prober refreshes every
 	// peer, so buttons stop rendering within half a minute of a peer dying
 	// even on pages nobody reloads.
 	pluginProbeInterval = 30 * time.Second
 	pluginProbeTimeout  = 4 * time.Second
 )
-
-// pluginProbe is one peer's cached connectivity state. An empty conn is a
-// cold cache, which renders optimistically like MonloaderUsable does.
-type pluginProbe struct {
-	conn      string // "" | "ok" | "down"
-	version   string
-	checkedAt time.Time
-}
 
 // plugins copies the configured blocks under the lock its mutators take.
 func (s *Server) plugins() []config.PluginConfig {
@@ -90,7 +80,7 @@ func (s *Server) pluginUsable(p config.PluginConfig) bool {
 	if p.Paused {
 		return false
 	}
-	return s.pluginProbeSeed(p.Name).conn != "down"
+	return s.peers.ProbeSeed(p.Name).Conn != "down"
 }
 
 // pluginOffState names why a paired peer cannot be reached, for the title on
@@ -100,12 +90,6 @@ func pluginOffState(p config.PluginConfig) string {
 		return "paused"
 	}
 	return "not responding"
-}
-
-// markPluginDown records a failed call so the peer's buttons go inert
-// without waiting for the next scheduled probe.
-func (s *Server) markPluginDown(name string) {
-	s.setPluginProbe(name, pluginProbe{conn: "down", checkedAt: time.Now()})
 }
 
 // peerOverrideURL is the operator's configured address for a peer, before any
@@ -121,29 +105,6 @@ func (s *Server) peerOverrideURL(app string) string {
 		return strings.TrimSpace(p.APIURL)
 	}
 	return ""
-}
-
-func (s *Server) pluginProbeSeed(name string) pluginProbe {
-	s.pluginProbeMu.Lock()
-	defer s.pluginProbeMu.Unlock()
-	return s.pluginProbes[name]
-}
-
-// clearPluginProbe forgets what a peer's last probe said, leaving the cold
-// cache's optimistic reading until the next one lands.
-func (s *Server) clearPluginProbe(name string) {
-	s.pluginProbeMu.Lock()
-	defer s.pluginProbeMu.Unlock()
-	delete(s.pluginProbes, name)
-}
-
-func (s *Server) setPluginProbe(name string, pr pluginProbe) {
-	s.pluginProbeMu.Lock()
-	defer s.pluginProbeMu.Unlock()
-	if s.pluginProbes == nil {
-		s.pluginProbes = map[string]pluginProbe{}
-	}
-	s.pluginProbes[name] = pr
 }
 
 // probePeer reports whether base answers a health probe, and the version it
@@ -207,25 +168,25 @@ func (s *Server) refreshPluginProbes(ctx context.Context) {
 		if p.PeerToken == "" || p.Paused {
 			continue
 		}
-		if time.Since(s.pluginProbeSeed(p.Name).checkedAt) < pluginProbeTTL {
+		if !s.peers.Stale(p.Name) {
 			continue
 		}
 		base := s.pluginBase(p)
 		if base == "" {
-			s.setPluginProbe(p.Name, pluginProbe{conn: "down", checkedAt: time.Now()})
+			s.peers.MarkDown(p.Name)
 			continue
 		}
 		wg.Add(1)
 		go func(name, base string) {
 			defer wg.Done()
 			version, ok := probePeer(ctx, pluginClient, base)
-			pr := pluginProbe{conn: "down", checkedAt: time.Now()}
-			if ok {
-				// A peer that stops reporting its version keeps the one it
-				// gave at pairing rather than blanking the settings row.
-				pr = pluginProbe{conn: "ok", version: version, checkedAt: time.Now()}
+			if !ok {
+				s.peers.MarkDown(name)
+				return
 			}
-			s.setPluginProbe(name, pr)
+			// A peer that stops reporting its version keeps the one it gave
+			// at pairing rather than blanking the settings row.
+			s.peers.SetProbe(name, plugins.Probe{Conn: "ok", Version: version, CheckedAt: time.Now()})
 		}(p.Name, base)
 	}
 	wg.Wait()

@@ -1,0 +1,29 @@
+{{define "partials/empty_folders.html"}}
+<form class="empty-folders" hx-post="/settings/maintenance/empty-folders/remove"
+      hx-target="#flash-empty-folders" hx-swap="innerHTML"
+      hx-confirm="Remove the folders left checked?"
+      data-confirm-ok="Remove">
+  <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+  <div class="empty-folders-head">
+    <span><strong>{{len .Dirs}}</strong> empty folder{{plural (len .Dirs) "" "s"}} under the gallery root. Unchecked folders are kept.</span>
+    <span class="empty-folders-tools">
+      <button type="button" class="btn-sm" data-empty-all="1">[all]</button>
+      <button type="button" class="btn-sm" data-empty-all="0">[none]</button>
+    </span>
+  </div>
+  <ul class="empty-folders-list">
+    {{range .Dirs}}
+    <li><label>
+      <input type="checkbox" name="folder" value="{{.Path}}" checked>
+      <span class="empty-folders-path">{{.Path}}</span>
+      <span class="empty-folders-date">{{localDate .ModTime}}</span>
+    </label></li>
+    {{end}}
+  </ul>
+  {{if .Withheld}}<p class="field-hint">{{.Withheld}} more not listed - remove these and scan again.</p>{{end}}
+  <div class="empty-folders-foot">
+    <span id="empty-folders-count">{{len .Dirs}} of {{len .Dirs}} selected</span>
+    <button type="submit" class="btn-danger btn-sm">Remove</button>
+  </div>
+</form>
+{{end}}

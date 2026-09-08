@@ -39,6 +39,7 @@ func writeCategoryError(w http.ResponseWriter, err error) {
 		{tags.ErrReservedCategoryName, http.StatusBadRequest, "invalid_request"},
 		{tags.ErrInvalidMoveTarget, http.StatusBadRequest, "invalid_request"},
 		{tags.ErrRatingTagImmutable, http.StatusBadRequest, "invalid_request"},
+		{tags.ErrRatingCategoryClosed, http.StatusBadRequest, "invalid_request"},
 	}) {
 		return
 	}
@@ -78,7 +79,7 @@ func (h *Handler) listCategories(w http.ResponseWriter, r *http.Request) {
 	for _, c := range cats {
 		out = append(out, toCategoryResponse(c))
 	}
-	writeJSON(w, http.StatusOK, out)
+	WriteJSON(w, http.StatusOK, out)
 }
 
 // createCategory handles POST /api/v1/categories. color defaults to the
@@ -102,7 +103,7 @@ func (h *Handler) createCategory(w http.ResponseWriter, r *http.Request) {
 		writeCategoryError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toCategoryResponse(*cat))
+	WriteJSON(w, http.StatusCreated, toCategoryResponse(*cat))
 }
 
 // patchCategory handles PATCH /api/v1/categories/{id}: rename and/or
@@ -146,7 +147,7 @@ func (h *Handler) patchCategory(w http.ResponseWriter, r *http.Request) {
 		writeCategoryError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toCategoryResponse(cat))
+	WriteJSON(w, http.StatusOK, toCategoryResponse(cat))
 }
 
 // deleteCategory handles DELETE /api/v1/categories/{id}. action is

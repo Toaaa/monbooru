@@ -25,6 +25,7 @@ var (
 	ErrReservedCategoryName = errors.New("this name is used by a search filter (e.g. " + reservedCategoryHint() + ")")
 	ErrNonCanonicalRating   = errors.New("rating category accepts only general, sensitive, questionable, explicit")
 	ErrRatingTagImmutable   = errors.New("rating category tags cannot be renamed, moved, or turned into aliases")
+	ErrRatingCategoryClosed = errors.New("nothing new can go into the rating category")
 	ErrInvalidMoveTarget    = errors.New("tags must move to another existing category")
 
 	// #rgb or #rrggbb. Anything else gets ZgotmplZ'd in the template's
@@ -97,13 +98,9 @@ var (
 
 // IsCanonicalRating reports whether name is one of the four allowed
 // rating tag names. The rating category refuses any other name.
-func IsCanonicalRating(name string) bool {
-	return RatingRank(name) >= 0
-}
+func IsCanonicalRating(name string) bool { return RatingRank(name) >= 0 }
 
-func isReservedCategoryName(name string) bool {
-	return slices.Contains(reservedCategoryList, name)
-}
+func isReservedCategoryName(name string) bool { return slices.Contains(reservedCategoryList, name) }
 
 // reservedCategoryHint formats reservedCategoryList as a human-readable
 // "fav:, source:, cat:, ..." list for the inline error message. Computed
@@ -194,9 +191,7 @@ func New(database *db.DB) *Service {
 // when the category is missing (only possible on a pre-bootstrap DB).
 func (s *Service) RatingCategoryID() int64 { return s.ratingCatID }
 
-func (s *Service) inWriteTx(work func(*sql.Tx) error) error {
-	return db.InWriteTx(s.db.Write, work)
-}
+func (s *Service) inWriteTx(work func(*sql.Tx) error) error { return db.InWriteTx(s.db.Write, work) }
 
 // RecalcDB recomputes usage_count from image_tags (non-missing images
 // only). Call after bulk deletes, imports, or sync. Tag rows are kept
@@ -267,9 +262,7 @@ func RecalcDBCount(database *db.DB) (int64, error) {
 	return updated, nil
 }
 
-func (s *Service) RecalcCount() (int64, error) {
-	return RecalcDBCount(s.db)
-}
+func (s *Service) RecalcCount() (int64, error) { return RecalcDBCount(s.db) }
 
 // ChunkedDeleteWithTagRecalc walks ids in 500-row write transactions.
 // Per chunk it (1) collects the distinct tag_ids the about-to-delete

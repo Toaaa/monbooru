@@ -8,7 +8,10 @@
   <span class="order-mode-filename" hidden>Showing <strong>{{.Name}}</strong> by filename.<br>Save stores this order, or click images to set your own instead.</span>
 </p>
 {{if .CeilingHidden}}
-<p class="field-hint">{{.CeilingHidden}} {{plural .CeilingHidden "image" "images"}} in this collection {{if eq .CeilingHidden 1}}is{{else}}are{{end}} hidden by the rating ceiling; ordering still covers {{if eq .CeilingHidden 1}}it{{else}}them{{end}}.</p>
+<p class="field-hint">{{.CeilingHidden}} {{plural .CeilingHidden "image" "images"}} in this collection {{if eq .CeilingHidden 1}}is{{else}}are{{end}} hidden by the rating ceiling;
+  <span class="order-mode-order">{{if eq .CeilingHidden 1}}it keeps its place{{else}}they keep their places{{end}} after the ones you order.</span>
+  <span class="order-mode-filename" hidden>ordering still covers {{if eq .CeilingHidden 1}}it{{else}}them{{end}}.</span>
+</p>
 {{end}}
 <div class="collection-order-grid">
   {{range .Members}}

@@ -45,12 +45,12 @@ type DispatchRule struct {
 // callers can call Lookup without a nil check.
 func LoadDispatch(modelPath, taggerName string, catIDs map[string]int64) *DispatchTable {
 	out := &DispatchTable{rules: map[string]DispatchRule{}}
-	for _, r := range parseEmbeddedDispatch(taggerName) {
+	for _, r := range EmbeddedDispatchRules(taggerName) {
 		if rule, ok := compileDispatchRule(r, catIDs); ok {
 			out.rules[r.Source] = rule
 		}
 	}
-	for _, r := range parseOverlayDispatch(modelPath, taggerName) {
+	for _, r := range OverlayDispatchRules(modelPath, taggerName) {
 		if rule, ok := compileDispatchRule(r, catIDs); ok {
 			out.rules[r.Source] = rule
 		}

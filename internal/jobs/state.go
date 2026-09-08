@@ -41,9 +41,7 @@ type Manager struct {
 }
 
 // NewManager returns a new Manager with no active job.
-func NewManager() *Manager {
-	return &Manager{}
-}
+func NewManager() *Manager { return &Manager{} }
 
 // clearStateLocked resets the manager to idle, stopping any armed
 // auto-dismiss timer. Caller must hold m.mu.

@@ -91,6 +91,7 @@ func writeTagError(w http.ResponseWriter, err error) {
 		{tags.ErrInvalidTagName, http.StatusBadRequest, "invalid_request"},
 		{tags.ErrNonCanonicalRating, http.StatusBadRequest, "invalid_request"},
 		{tags.ErrRatingTagImmutable, http.StatusBadRequest, "invalid_request"},
+		{tags.ErrRatingCategoryClosed, http.StatusBadRequest, "invalid_request"},
 	}) {
 		return
 	}
@@ -144,7 +145,7 @@ func (h *Handler) createTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.invalidate()
-	writeJSON(w, http.StatusCreated, toTagResponse(full))
+	WriteJSON(w, http.StatusCreated, toTagResponse(full))
 }
 
 // patchTag handles PATCH /api/v1/tags/{id}: rename and/or move to
@@ -192,7 +193,7 @@ func (h *Handler) patchTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.invalidate()
-	writeJSON(w, http.StatusOK, toTagResponse(full))
+	WriteJSON(w, http.StatusOK, toTagResponse(full))
 }
 
 // deleteTag handles DELETE /api/v1/tags/{id}. Rating-category rows are
@@ -249,7 +250,7 @@ func (h *Handler) createAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.invalidate()
-	writeJSON(w, http.StatusCreated, toTagResponse(alias))
+	WriteJSON(w, http.StatusCreated, toTagResponse(alias))
 }
 
 // mergeTags handles POST /api/v1/tags/merge: make alias_id an alias of
@@ -281,7 +282,7 @@ func (h *Handler) mergeTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.invalidate()
-	writeJSON(w, http.StatusOK, toTagResponse(canon))
+	WriteJSON(w, http.StatusOK, toTagResponse(canon))
 }
 
 type implicationJSON struct {
@@ -315,7 +316,7 @@ func (h *Handler) listImplications(w http.ResponseWriter, r *http.Request) {
 			ImpliedCategory: im.ImpliedCategoryName,
 		})
 	}
-	writeJSON(w, http.StatusOK, out)
+	WriteJSON(w, http.StatusOK, out)
 }
 
 // addImplication handles POST /api/v1/tags/{id}/implications. Body

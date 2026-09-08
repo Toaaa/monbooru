@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/monbooru/monbooru/internal/config"
@@ -23,6 +24,101 @@ import (
 // operator asked for.
 const scheduleGraceDelay = 5 * time.Minute
 
+// scheduler is what the run loop records about its own passes, written
+// from runScheduler's goroutine and read by the Schedule settings section.
+type scheduler struct {
+	// reload wakes runScheduler so a Settings edit takes effect on the next
+	// select tick instead of waiting out the current sleep. Buffered cap 1
+	// with non-blocking sends so concurrent saves coalesce into one reload.
+	reload chan struct{}
+
+	mu       sync.Mutex
+	lastRun  time.Time
+	lastDur  time.Duration
+	lastInfo string // "OK" or a short failure summary; empty when never run
+	// lookupInfo is what the last run's lookup phases found, one line per
+	// phase and gallery; the run-level info above cannot carry it.
+	lookupInfo []string
+	// galleryOffset is where the next run starts in the gallery list, so a
+	// budget too small for the first gallery cannot starve the rest.
+	galleryOffset int
+	// catchUpDay is the local day the startup catch-up fired on. The clock
+	// trigger skips only that day; every other pass, a manual one included,
+	// leaves it owed.
+	catchUpDay time.Time
+}
+
+func newScheduler() *scheduler {
+	return &scheduler{reload: make(chan struct{}, 1)}
+}
+
+// requestReload wakes the scheduler if it is not already owed a wake-up.
+func (sc *scheduler) requestReload() {
+	select {
+	case sc.reload <- struct{}{}:
+	default:
+	}
+}
+
+func (sc *scheduler) markCatchUpDay(at time.Time) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.catchUpDay = at
+}
+
+// catchUpFiredToday reports whether the startup pass was the one that
+// covered now's day.
+func (sc *scheduler) catchUpFiredToday(now time.Time) bool {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return !sc.catchUpDay.IsZero() && !localDayStart(now).After(localDayStart(sc.catchUpDay))
+}
+
+// nextOffset hands out the gallery the next run starts from and advances it.
+func (sc *scheduler) nextOffset(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	start := sc.galleryOffset % n
+	sc.galleryOffset = (start + 1) % n
+	return start
+}
+
+func (sc *scheduler) recordRun(started time.Time, dur time.Duration, info string) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.lastRun, sc.lastDur, sc.lastInfo = started, dur, info
+}
+
+// recordLookup keeps a lookup phase's summary for the Schedule section's own
+// status line, which the run-level "OK" cannot carry: the operator wants to
+// know what the night found, not only that it finished. Lines accumulate
+// across the run's phases and galleries; clearLookup starts the next run
+// from empty.
+func (sc *scheduler) recordLookup(summary string) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.lookupInfo = append(sc.lookupInfo, summary)
+}
+
+func (sc *scheduler) clearLookup() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.lookupInfo = nil
+}
+
+// lastRunStatus fills in the half of ScheduleStatus this group owns.
+func (sc *scheduler) lastRunStatus() ScheduleStatus {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return ScheduleStatus{
+		LastRun: sc.lastRun, LastDur: sc.lastDur, LastInfo: sc.lastInfo,
+		LookupInfo: append([]string(nil), sc.lookupInfo...),
+	}
+}
+
 // runScheduler is a background goroutine that fires once per day at
 // cfg.Schedule.Time and runs the enabled actions sequentially on every
 // configured gallery. Started from NewServer; exits when s.done is closed.
@@ -35,11 +131,11 @@ func (s *Server) runScheduler() {
 		if !ok {
 			// No action enabled (or invalid time). Sleep an hour then re-check
 			// so Settings edits pick up without a server restart - and wake
-			// early when a save signals via schedReload.
+			// early when a save signals a reload.
 			select {
 			case <-s.done:
 				return
-			case <-s.schedReload:
+			case <-s.sched.reload:
 				continue
 			case <-time.After(time.Hour):
 				continue
@@ -50,10 +146,10 @@ func (s *Server) runScheduler() {
 		select {
 		case <-s.done:
 			return
-		case <-s.schedReload:
+		case <-s.sched.reload:
 			continue
 		case <-time.After(d):
-			if !s.clockFireOwed() {
+			if !s.clockFireOwed(time.Now()) {
 				logx.Infof("scheduler: today's pass already ran; skipping the clock trigger")
 				continue
 			}
@@ -80,6 +176,7 @@ func (s *Server) scheduleCatchUp() {
 		return
 	}
 	logx.Infof("scheduler: running the pass this machine was not awake for")
+	s.sched.markCatchUpDay(time.Now())
 	s.runScheduledActions()
 }
 
@@ -94,15 +191,19 @@ func (s *Server) catchUpOwed() bool {
 // The two triggers are independent, so in catch-up mode a boot between
 // midnight and schedule.time runs the pass once on the grace delay and
 // then again on the clock - two full syncs inside half an hour. Only
-// that mode has a startup pass to collide with.
-func (s *Server) clockFireOwed() bool {
+// that mode has a startup pass to collide with, and only that pass:
+// the day has to have been covered by the catch-up rather than by any
+// run, or a Run now in the morning would spend the night's.
+func (s *Server) clockFireOwed(now time.Time) bool {
 	s.cfgMu.RLock()
 	mode := s.cfg.Schedule.EffectiveMode()
 	s.cfgMu.RUnlock()
-	if mode != config.ScheduleAtTimeCatchup {
+	if mode != config.ScheduleAtTimeCatchup || !s.sched.catchUpFiredToday(now) {
 		return true
 	}
-	return dayPassOwed(s.lastScheduledRun(), time.Now())
+	// A catch-up the job lane refused recorded nothing, so the clock is
+	// still the day's only pass.
+	return dayPassOwed(s.lastScheduledRun(), now)
 }
 
 // shouldCatchUp decides whether a startup pass is owed. on_start has no
@@ -160,7 +261,10 @@ func (s *Server) nextScheduledFire(now time.Time) (time.Time, bool) {
 	}
 	year, month, day := now.Date()
 	fire := time.Date(year, month, day, t.hour, t.minute, 0, 0, now.Location())
-	if !fire.After(now) {
+	// Today's slot is gone once it has passed, and equally once the
+	// catch-up has covered the day - reporting it would name a time the
+	// trigger is going to skip.
+	if !fire.After(now) || !s.clockFireOwed(now) {
 		// time.Date normalises components, so passing day+1 walks the
 		// calendar through DST transitions correctly. Add(24h) would
 		// slip the local fire time by an hour twice a year.
@@ -211,7 +315,7 @@ func (s *Server) runScheduledActions() {
 	defer s.jobs.EndSchedule()
 
 	started := time.Now()
-	s.clearLookupRun()
+	s.sched.clearLookup()
 	var failures []string
 	cancelled := false
 	defer func() {
@@ -239,7 +343,7 @@ func (s *Server) runScheduledActions() {
 	// every other gallery permanently, and map order gives no rotation to
 	// build on. Losing the offset on a restart costs one unfair run.
 	slices.Sort(names)
-	names = rotateStrings(names, s.nextScheduleOffset(len(names)))
+	names = rotateStrings(names, s.sched.nextOffset(len(names)))
 
 	// User cancel mid-run clears scheduleHeld (Manager.Cancel does this)
 	// so the outer loop can bail at the next phase boundary. Without
@@ -260,7 +364,7 @@ func (s *Server) runScheduledActions() {
 		if abort() {
 			return
 		}
-		cx := s.Get(name)
+		cx := s.get(name)
 		if cx == nil {
 			continue
 		}
@@ -303,9 +407,9 @@ func (s *Server) runScheduledActions() {
 		if sched.LookupPTR {
 			switch {
 			case !s.monloaderUsable():
-				s.recordLookupRun("[" + name + "] Lookup skipped: monloader unreachable.")
+				s.sched.recordLookup("[" + name + "] Lookup skipped: monloader unreachable.")
 			case !s.monloaderPTRReady():
-				s.recordLookupRun("[" + name + "] PTR lookup skipped: monloader's index is not ready.")
+				s.sched.recordLookup("[" + name + "] PTR lookup skipped: monloader's index is not ready.")
 			default:
 				if err := s.scheduledPTRLookup(cx); err != nil {
 					failures = append(failures, "ptr-lookup "+name+": "+err.Error())
@@ -317,7 +421,7 @@ func (s *Server) runScheduledActions() {
 		}
 		if sched.LookupBooru {
 			if !s.monloaderUsable() {
-				s.recordLookupRun("[" + name + "] Online lookup skipped: monloader unreachable.")
+				s.sched.recordLookup("[" + name + "] Online lookup skipped: monloader unreachable.")
 			} else if err := s.scheduledOnlineLookup(cx); err != nil {
 				failures = append(failures, "online-lookup "+name+": "+err.Error())
 			}
@@ -331,7 +435,7 @@ func (s *Server) runScheduledActions() {
 // monloaderPTRReady reports the cached PTR capability, so a phase can skip a
 // backend monloader would only 409 anyway.
 func (s *Server) monloaderPTRReady() bool {
-	_, _, ready, _, _ := s.monloaderStatusSeed()
+	ready := s.mlStatus.Seed().PTR
 	return ready
 }
 
@@ -344,19 +448,6 @@ func (s *Server) startScheduledPhase(jobType, phase, gallery string) (context.Co
 		return nil, err
 	}
 	return s.jobs.Context(), nil
-}
-
-// nextScheduleOffset returns where this run starts in the gallery list and
-// advances the stored position for the next one.
-func (s *Server) nextScheduleOffset(n int) int {
-	if n <= 1 {
-		return 0
-	}
-	s.schedMu.Lock()
-	defer s.schedMu.Unlock()
-	start := s.schedGalleryOffset % n
-	s.schedGalleryOffset = (start + 1) % n
-	return start
 }
 
 // rotateStrings returns names starting at offset and wrapping around.
@@ -539,31 +630,10 @@ func (s *Server) scheduledAutotag(cx *galleryCtx) error {
 // settings section can show "Last run: ... (OK, 3m12s)". info is a short
 // status string ("OK" or a failure summary).
 func (s *Server) recordScheduleRun(started time.Time, dur time.Duration, info string) {
-	s.schedMu.Lock()
-	s.schedLastRun = started
-	s.schedLastDur = dur
-	s.schedLastInfo = info
-	s.schedMu.Unlock()
+	s.sched.recordRun(started, dur, info)
 	// Persisted too: the in-memory copy dies with the process, and a
 	// catch-up run has to know whether last night already happened.
 	s.saveScheduledRun(started)
-}
-
-// recordLookupRun keeps a lookup phase's summary for the Schedule section's
-// own status line, which the run-level "OK" cannot carry: the operator wants
-// to know what the night found, not only that it finished. Lines accumulate
-// across the run's phases and galleries; clearLookupRun starts the next run
-// from empty.
-func (s *Server) recordLookupRun(summary string) {
-	s.schedMu.Lock()
-	defer s.schedMu.Unlock()
-	s.schedLookupInfo = append(s.schedLookupInfo, summary)
-}
-
-func (s *Server) clearLookupRun() {
-	s.schedMu.Lock()
-	defer s.schedMu.Unlock()
-	s.schedLookupInfo = nil
 }
 
 // ScheduleStatus reports the last recorded scheduler run plus the next fire
@@ -582,14 +652,9 @@ type ScheduleStatus struct {
 	LookupInfo []string
 }
 
-// ScheduleStatus returns the current scheduler status for the settings page.
-func (s *Server) ScheduleStatus() ScheduleStatus {
-	s.schedMu.Lock()
-	st := ScheduleStatus{
-		LastRun: s.schedLastRun, LastDur: s.schedLastDur, LastInfo: s.schedLastInfo,
-		LookupInfo: append([]string(nil), s.schedLookupInfo...),
-	}
-	s.schedMu.Unlock()
+// scheduleStatus returns the current scheduler status for the settings page.
+func (s *Server) scheduleStatus() ScheduleStatus {
+	st := s.sched.lastRunStatus()
 	if next, ok := s.nextScheduledFire(time.Now()); ok {
 		st.NextRun = next
 		return st

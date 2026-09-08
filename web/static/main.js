@@ -11,10 +11,12 @@ var chordTimeoutMs = 500;
 // Chord tree. A leaf is a string URL (navigated to) or a function run with
 // no args; a nested map is a sub-chord whose own keys resolve the next
 // step. `g` leads navigation (`g c a` categories, `g c o` collections).
-// `e` leads detail-page field edits: `s` opens the add-source dialog, `c`
-// opens the add-to-collection dialog, `n` the note dialog, and a digit
-// edits that Nth collection. On pages without the matching control the
-// chord no-ops.
+// `e` leads detail-page field edits: source, collection, note, annotation,
+// relation, the bulk tag removal and the gallery transfer, plus a digit for
+// that Nth collection. `t` leads the tag actions on the tags listing
+// and a tag's own page. A leaf given as a selector list clicks the first
+// one present, and the leader hint drops the leaves this page cannot serve.
+// On pages without the matching control the chord no-ops.
 var chordMap = {
   g: {
     g: '/',
@@ -24,22 +26,39 @@ var chordMap = {
       o: '/collections',
     },
     t: '/tags',
+    r: '/relations',
     s: '/settings',
   },
+  t: {
+    r: ['#btn-detail-rename'],
+    c: ['#tag-batch-bar:not([hidden]) #btn-batch-category', '#btn-detail-category'],
+    a: ['#tag-batch-bar:not([hidden]) #btn-batch-alias', '#btn-detail-alias'],
+    m: ['#tag-batch-bar:not([hidden]) #btn-batch-merge'],
+    i: ['#tag-batch-bar:not([hidden]) #btn-batch-imply'],
+    f: ['#tag-batch-bar:not([hidden]) #btn-batch-merge-folded'],
+    p: ['#tag-batch-bar:not([hidden]) #btn-batch-ptr'],
+  },
+  // The x chord has no named leaves: its leaves are the digits, one per
+  // plugin button on whichever bar is up.
+  x: {},
   e: {
-    s: function () { var b = document.querySelector('.btn-add-source'); if (b) b.click(); },
-    c: function () { var b = document.querySelector('.btn-add-collection'); if (b) b.click(); },
-    n: function () { var b = document.querySelector('.btn-edit-note'); if (b) b.click(); },
+    s: ['.btn-add-source'],
+    c: ['.btn-add-collection'],
+    n: ['.btn-edit-note'],
+    a: ['.btn-add-annotation'],
+    r: ['[data-relations-add]'],
+    t: ['#remove-tags-btn'],
+    g: ['#transfer-image-btn'],
   },
 };
 
-// editCollection opens the edit dialog for the Nth collection listed on the
-// detail page (1-based, render order). Returns false when out of range.
-function editCollection(n) {
-  var btns = document.querySelectorAll('.btn-edit-collection');
-  if (n < 1 || n > btns.length) return false;
-  btns[n - 1].click();
-  return true;
+// chordDigitTargets names the controls a chord's digit leaves click, in
+// render order: the collections listed on an image, and the plugin buttons
+// on whichever bar is up.
+function chordDigitTargets(node) {
+  if (node === chordMap.e) return document.querySelectorAll('.btn-edit-collection');
+  if (node === chordMap.x) return document.querySelectorAll('.plugin-card .plugin-btn, #plugin-batch-bar.visible .plugin-btn');
+  return null;
 }
 
 function clearChord() {
@@ -64,10 +83,13 @@ function showChordHint(node, label) {
   if (_chordHint && _chordHint.parentNode) _chordHint.parentNode.removeChild(_chordHint);
   _chordHint = document.createElement('div');
   _chordHint.className = 'chord-leader-hint';
-  var keys = Object.keys(node || {});
-  if (node === chordMap.e) {
-    var nCol = document.querySelectorAll('.btn-edit-collection').length;
-    for (var i = 1; i <= nCol && i <= 9; i++) keys.push(String(i));
+  var keys = Object.keys(node || {}).filter(function(k) {
+    var leaf = node[k];
+    return !Array.isArray(leaf) || leaf.some(function(sel) { return document.querySelector(sel); });
+  });
+  var digits = chordDigitTargets(node);
+  if (digits) {
+    for (var i = 1; i <= digits.length && i <= 9; i++) keys.push(String(i));
   }
   keys.sort();
   _chordHint.textContent = label + ' → ' + keys.join(' / ');
@@ -147,10 +169,31 @@ function moveGridCursor(dx, dy) {
   return true;
 }
 
+// Row cursor on the tags listing, the table's counterpart to the grid
+// cursor: it is what Space and Enter act on.
+function moveTagRowCursor(step) {
+  var rows = Array.from(document.querySelectorAll('.tag-row'));
+  if (rows.length === 0) return false;
+  var focused = document.querySelector('.tag-row.focused');
+  var at = focused ? rows.indexOf(focused) + step : 0;
+  setFocused(rows, Math.max(0, Math.min(rows.length - 1, at)));
+  return true;
+}
+
 function jumpGridCursor(target) {
   var cards = Array.from(document.querySelectorAll('.thumb-card'));
   if (cards.length === 0) return false;
   setFocused(cards, target === 'first' ? 0 : cards.length - 1);
+  return true;
+}
+
+// stepThumbSize walks the size ramp; the pressed button is the current size.
+function stepThumbSize(delta) {
+  var btns = Array.from(document.querySelectorAll('#thumb-size-ramp button'));
+  if (btns.length === 0) return false;
+  var at = btns.findIndex(function(b) { return b.getAttribute('aria-pressed') === 'true'; });
+  var next = Math.max(0, Math.min(btns.length - 1, (at < 0 ? 0 : at) + delta));
+  if (next !== at) btns[next].click();
   return true;
 }
 
@@ -162,8 +205,8 @@ function clickPagination(needle) {
   return false;
 }
 
-// handlePaginationKey maps [ ] G p onto the shared pagination controls
-// (used verbatim by the tags page and the gallery). Returns true when the
+// handlePaginationKey maps [ ] G p onto the shared pagination controls, so
+// the keys reach every page that renders the partial. Returns true when the
 // key was consumed - the matching control exists and was clicked.
 function handlePaginationKey(e) {
   if (e.key === '[') return clickPagination('Prev');
@@ -337,6 +380,60 @@ function batchBarVisible() {
   return !!(bar && bar.classList.contains('visible'));
 }
 
+// The surfaces whose bindings are live right now, read off the same
+// predicates the keydown router branches on so the sheet and the router
+// cannot disagree about what a key does here.
+function activeSurfaces() {
+  var s = ['anywhere'];
+  if (isGalleryPage())    s.push('gallery');
+  if (batchBarVisible())  s.push('selection');
+  if (isDetailPage())     s.push('detail');
+  if (isTagsPage())       s.push('tags');
+  if (isTagDetailPage())  s.push('tag-detail');
+  if (isCategoriesPage()) s.push('categories');
+  if (isSettingsPage())   s.push('settings');
+  if (document.getElementById('pages-grid-page')) s.push('pages');
+  if (document.getElementById('relations-session-page')) s.push('relations');
+  if (document.querySelector('.detail-img-link')) s.push('lightbox');
+  return s;
+}
+
+// Hides the blocks for surfaces the operator is not on, and the rows whose
+// control this page does not render - each row's data-when is the selector
+// its handler looks for, so a listed key always has something behind it.
+function syncShortcutSheet(dlg) {
+  var all = dlg.classList.contains('show-all');
+  var active = activeSurfaces();
+  dlg.querySelectorAll('section[data-surface]').forEach(function(sec) {
+    sec.hidden = !all && active.indexOf(sec.dataset.surface) === -1;
+  });
+  dlg.querySelectorAll('[data-when]').forEach(function(row) {
+    row.hidden = !all && !document.querySelector(row.dataset.when);
+  });
+}
+
+function openShortcutSheet() {
+  var dlg = document.getElementById('shortcuts-help');
+  if (!dlg) return false;
+  dlg.classList.remove('show-all');
+  var toggle = document.getElementById('shortcuts-all');
+  if (toggle) toggle.textContent = '[all surfaces]';
+  syncShortcutSheet(dlg);
+  if (!dlg.open) dlg.showModal();
+  // showModal scrolls its first focusable element into view, which on a
+  // viewport too short for the sheet means opening below the title.
+  dlg.scrollTop = 0;
+  return true;
+}
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest || !e.target.closest('#shortcuts-all')) return;
+  var dlg = document.getElementById('shortcuts-help');
+  var all = dlg.classList.toggle('show-all');
+  e.target.textContent = all ? '[this page]' : '[all surfaces]';
+  syncShortcutSheet(dlg);
+});
+
 // Pages-grid keymap. Arrow keys walk the cell focus across rows / columns
 // (cols computed from the rendered card width like the gallery grid),
 // Enter opens the focused page in the reader, Home / End jump.
@@ -406,12 +503,9 @@ function handlePagesGridKey(e) {
   return false;
 }
 
-// Image viewer (lightbox). Triggered from the detail page by clicking
-// the still-image, the .btn-view button, or pressing 'v'; from the
-// manga reader by clicking a page or pressing 'v'. Uses a <dialog> so
-// the browser handles Esc / scroll lock natively; the keymap below
-// runs first in the global router so wheel-driven zoom and pan keys
-// don't leak into detail-page bindings.
+// Uses a <dialog> so the browser handles Esc / scroll lock natively; the
+// keymap below runs first in the global router so wheel-driven zoom and
+// pan keys don't leak into detail-page bindings.
 var lightbox = (function () {
   var dlg = null, img = null, stage = null, zoomLbl = null, openLink = null;
   var scale = 1, tx = 0, ty = 0;
@@ -423,14 +517,33 @@ var lightbox = (function () {
   var bound = false;
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  // The scale that renders one image pixel per device pixel. `scale` is a
+  // multiplier on top of the CSS fit, so the ratio is read back off the
+  // painted box rather than assumed to be 1.
+  function oneToOneScale() {
+    if (!img || !img.naturalWidth) return 0;
+    var r = contentRect();
+    if (!r || !r.width) return 0;
+    return img.naturalWidth * scale / r.width;
+  }
+  // The floor keeps a large image from shrinking to nothing, but 1:1 on an
+  // image smaller than the stage sits below it, so it never rules that out.
+  function minScale() {
+    var one = oneToOneScale();
+    return one > 0 ? Math.min(0.5, one) : 0.5;
+  }
   function apply() {
     if (!img) return;
     img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
-    if (zoomLbl) zoomLbl.textContent = Math.round(scale * 100) + '%';
+    if (!zoomLbl) return;
+    // Reported against the image's own pixels, not the fit: on a small
+    // image the fit is already an upscale, and "100%" there would lie.
+    var one = oneToOneScale();
+    zoomLbl.textContent = Math.round((one > 0 ? scale / one : scale) * 100) + '%';
   }
   function reset() { scale = 1; tx = 0; ty = 0; apply(); }
   function zoomAt(cx, cy, factor) {
-    var ns = clamp(scale * factor, 0.5, 4);
+    var ns = clamp(scale * factor, minScale(), 4);
     var k = ns / scale;
     tx = cx - k * (cx - tx);
     ty = cy - k * (cy - ty);
@@ -461,10 +574,9 @@ var lightbox = (function () {
   // so we invert through whatever scale is active right now to land on
   // naturalWidth without re-reading the un-transformed bounding box.
   function oneToOne() {
-    if (!img || !img.naturalWidth) return;
-    var r = contentRect();
-    if (!r || !r.width) return;
-    var ns = clamp(img.naturalWidth * scale / r.width, 0.5, 4);
+    var one = oneToOneScale();
+    if (one <= 0) return;
+    var ns = clamp(one, minScale(), 4);
     var k = ns / scale;
     tx = k * tx; ty = k * ty;
     scale = ns;
@@ -529,6 +641,9 @@ var lightbox = (function () {
       stage.addEventListener('pointerup', onPointerEnd);
       stage.addEventListener('pointercancel', onPointerEnd);
       stage.addEventListener('dblclick', onDblClick);
+      // The zoom readout needs the natural size, which open() sets the src
+      // too early to have.
+      img.addEventListener('load', apply);
       dlg.addEventListener('close', reset);
       var closeBtn = document.getElementById('lightbox-close');
       if (closeBtn) closeBtn.addEventListener('click', function () { dlg.close(); });
@@ -664,7 +779,6 @@ function handleReaderKey(e) {
   return false;
 }
 
-// Keyboard navigation
 document.addEventListener('keydown', function(e) {
   var tag = e.target.tagName.toLowerCase();
   var isInput = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
@@ -677,8 +791,9 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
     if (isInput) { e.target.blur(); return; }
     if (document.querySelector('dialog[open]')) return;
-    if (batchBarVisible()) {
+    if (selectionArmed()) {
       e.preventDefault();
+      selectMode = false;
       clearSelection();
       return;
     }
@@ -731,7 +846,7 @@ document.addEventListener('keydown', function(e) {
     var node = _chordNode;
     var label = _chordLabel;
     var next = node[e.key];
-    if (next && typeof next === 'object') {
+    if (next && typeof next === 'object' && !Array.isArray(next)) {
       e.preventDefault();
       enterChord(next, label + ' ' + e.key);
       return;
@@ -740,28 +855,28 @@ document.addEventListener('keydown', function(e) {
     if (next !== undefined) {
       e.preventDefault();
       if (typeof next === 'string') window.location.href = next;
+      else if (Array.isArray(next)) clickFirstSelector(next);
       else next();
       return;
     }
-    // e + digit edits the Nth listed collection on the detail page.
-    if (node === chordMap.e && /^[1-9]$/.test(e.key)) {
-      if (editCollection(parseInt(e.key, 10))) { e.preventDefault(); return; }
+    var digitTargets = chordDigitTargets(node);
+    if (digitTargets && /^[1-9]$/.test(e.key)) {
+      var picked = digitTargets[parseInt(e.key, 10) - 1];
+      if (picked) { e.preventDefault(); picked.click(); return; }
     }
     // Unknown key: fall through so it still does its single-key job.
   }
 
-  // ? overlay
   if (e.key === '?') {
     var helpDlg = document.getElementById('shortcuts-help');
     if (helpDlg) {
       e.preventDefault();
       if (helpDlg.open) helpDlg.close();
-      else helpDlg.showModal();
+      else openShortcutSheet();
     }
     return;
   }
 
-  // Search focus (anywhere a search input exists).
   if (e.key === 's' || e.key === '/') {
     if (focusFirstSelector(['#search-input', '#sidebar-inner input[name="q"]'])) {
       e.preventDefault();
@@ -775,17 +890,14 @@ document.addEventListener('keydown', function(e) {
     if (clickFirstSelector(['#sidebar-toggle'])) { e.preventDefault(); return; }
   }
 
-  // Y → click the topbar Sync button.
   if (e.key === 'Y') {
     var syncForm = document.querySelector('form[hx-post="/internal/sync"]');
     if (syncForm) { e.preventDefault(); syncForm.requestSubmit ? syncForm.requestSubmit() : syncForm.submit(); return; }
   }
 
-  // , / .  rating-ceiling cycle.
   if (e.key === ',') { if (cycleRatingCeiling(-1)) { e.preventDefault(); return; } }
   if (e.key === '.') { if (cycleRatingCeiling(+1)) { e.preventDefault(); return; } }
 
-  // \ switch gallery (only when more than one is configured).
   if (e.key === '\\') {
     var swDlg = document.getElementById('gallery-switch-dialog');
     if (swDlg) { e.preventDefault(); swDlg.showModal(); return; }
@@ -806,17 +918,41 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // Ctrl/Cmd+A → select every visible thumbnail. Gated on the gallery grid
-  // existing so the browser's native select-all-text still works on pages
-  // without a grid.
-  if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
-    if (!document.querySelector('.thumb-checkbox')) return;
+  // Leader: x picks a plugin button by position. Armed only when there are
+  // buttons, so the key stays free on every other surface.
+  if (e.key === 'x' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (chordDigitTargets(chordMap.x).length) {
+      e.preventDefault();
+      enterChord(chordMap.x, 'x');
+      return;
+    }
+  }
+
+  // Leader: t opens the tag-action chord on the two tag surfaces, where the
+  // key is otherwise unbound.
+  if (e.key === 't' && !e.ctrlKey && !e.metaKey && !e.altKey && (isTagsPage() || isTagDetailPage())) {
     e.preventDefault();
-    selectAll();
+    enterChord(chordMap.t, 't');
     return;
   }
 
-  // Tags page
+  // Ctrl/Cmd+A → select every visible thumbnail, or the tags listing's page.
+  // Gated on one of the two grids existing so the browser's native
+  // select-all-text still works elsewhere.
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+    if (document.querySelector('.thumb-checkbox')) {
+      e.preventDefault();
+      selectAll();
+      return;
+    }
+    var tagPageBox = document.getElementById('tag-select-page');
+    if (tagPageBox) {
+      e.preventDefault();
+      if (!tagPageBox.checked) tagPageBox.click();
+    }
+    return;
+  }
+
   if (isTagsPage()) {
     if (e.key === 'n') {
       if (clickFirstSelector(['#btn-create-tag'])) { e.preventDefault(); return; }
@@ -824,10 +960,10 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'N') {
       if (clickFirstSelector(['#btn-create-alias'])) { e.preventDefault(); return; }
     }
-    if (handlePaginationKey(e)) { e.preventDefault(); return; }
   }
 
-  // Categories page
+  if (handlePaginationKey(e)) { e.preventDefault(); return; }
+
   if (isCategoriesPage() && e.key === 'n') {
     if (focusFirstSelector(['.add-cat-form input[name="name"]'])) { e.preventDefault(); return; }
   }
@@ -855,17 +991,14 @@ document.addEventListener('keydown', function(e) {
     if (clickFirstSelector(['.btn-fav'])) { e.preventDefault(); return; }
   }
 
-  // 'a' → context-dependent add-tag entry point. Detail tag-input focus
-  // takes priority over the Actions chooser. Selection branch lives in the
-  // same key with priority: selection > detail tag input > gallery chooser.
+  // 'a' → context-dependent add-tag entry point: the selection's dialog
+  // first, then the detail page's tag input.
   if (e.key === 'a' && !e.ctrlKey && !e.metaKey) {
     if (batchBarVisible()) { e.preventDefault(); openTagSelectedDialog(); return; }
     var tagInput = document.getElementById('tag-input');
     if (tagInput) { e.preventDefault(); tagInput.focus(); return; }
-    if (clickFirstSelector(['#actions-btn'])) { e.preventDefault(); return; }
   }
 
-  // 'r' → remove tags on selection / enter detail tag-focus mode.
   if (e.key === 'r') {
     if (batchBarVisible()) { e.preventDefault(); openStripSelectedDialog(); return; }
     if (isDetailPage()) { e.preventDefault(); enterTagFocusMode(); return; }
@@ -893,6 +1026,20 @@ document.addEventListener('keydown', function(e) {
     var pagesBtn = document.querySelector('.btn-manga-action.btn-pages');
     if (pagesBtn) { e.preventDefault(); window.location.href = pagesBtn.href; return; }
   }
+  if (e.key === 'C' && isDetailPage()) {
+    if (clickFirstSelector(['.btn-manga-action.btn-generate-collection'])) { e.preventDefault(); return; }
+  }
+
+  if (e.key === 'd' && isDetailPage()) {
+    if (clickFirstSelector(['.detail-actions a[download]'])) { e.preventDefault(); return; }
+  }
+
+  // 'B' → flip the sidebar's tag listing between the category and source
+  // groupings, opening the column first like the other keys that reach in.
+  if (e.key === 'B' && isDetailPage()) {
+    var modeBtn = document.querySelector('.tag-mode-toggle');
+    if (modeBtn) { e.preventDefault(); revealSidebarFor(modeBtn); modeBtn.click(); return; }
+  }
 
   // 'v' → open the image viewer. Gated on the still-image branch
   // (the .detail-img-link anchor only renders for non-video / non-manga
@@ -902,7 +1049,6 @@ document.addEventListener('keydown', function(e) {
     if (lbTrigger) { e.preventDefault(); openLightbox(null, lbTrigger.href); return; }
   }
 
-  // 't' → auto-tag on selection / open detail auto-tag dialog.
   if (e.key === 't') {
     if (batchBarVisible()) {
       if (!document.querySelector('.btn-autotag')) return;
@@ -913,18 +1059,16 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
-  // 'm' → move dialog (selection on the gallery; detail page).
   if (e.key === 'm') {
-    if (batchBarVisible()) { e.preventDefault(); openBatchMoveDialog('selection'); return; }
+    if (batchBarVisible()) { e.preventDefault(); openBatchPlaceDialog('selection'); return; }
     if (isDetailPage()) {
-      var moveDlg = document.getElementById('move-image-dialog');
-      if (moveDlg && typeof openMoveImageDialog === 'function') {
-        e.preventDefault(); openMoveImageDialog(); return;
+      var placeDlg = document.getElementById('place-image-dialog');
+      if (placeDlg && typeof openPlaceImageDialog === 'function') {
+        e.preventDefault(); openPlaceImageDialog(); return;
       }
     }
   }
 
-  // 'i' → toggle inbox / archive (selection bulk dialog or detail toggle).
   if (e.key === 'i') {
     if (batchBarVisible()) {
       if (typeof openBatchInboxDialog === 'function') {
@@ -939,6 +1083,27 @@ document.addEventListener('keydown', function(e) {
   // 'L' → monloader lookup: batch dialog on a selection, or the detail
   // page's Find-tags-online button (which confirms, then runs the online
   // lookup). Both gate on the paired-only control being rendered.
+  if (e.key === 'c' && batchBarVisible()) {
+    if (typeof openBatchCollectionDialog === 'function') {
+      e.preventDefault(); openBatchCollectionDialog('selection'); return;
+    }
+  }
+
+  if (e.key === 'T' && batchBarVisible()) {
+    if (clickFirstSelector(['#batch-transfer'])) { e.preventDefault(); return; }
+  }
+
+  // Invert and the whole-search escalation are the two the operator reaches
+  // for with nothing picked yet, so they follow the controls' own state
+  // rather than there being a selection.
+  if (e.key === 'I' && selectionArmed()) {
+    if (clickFirstSelector(['#batch-invert'])) { e.preventDefault(); return; }
+  }
+
+  if (e.key === 'A' && !e.ctrlKey && !e.metaKey) {
+    if (clickFirstSelector(['#batch-select-all-matching:not([hidden])'])) { e.preventDefault(); return; }
+  }
+
   if (e.key === 'L') {
     if (batchBarVisible()) {
       if (document.querySelector('#batch-bar .monloader-accent')) {
@@ -956,28 +1121,34 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'R') {
       if (clickFirstSelector(['#random-sort-btn'])) { e.preventDefault(); return; }
     }
+    if (e.key === 'V') {
+      if (clickFirstSelector(['#select-mode-btn'])) { e.preventDefault(); return; }
+    }
+    if (e.key === '-' || e.key === '=') {
+      if (stepThumbSize(e.key === '=' ? 1 : -1)) { e.preventDefault(); return; }
+    }
     if (e.key === 'O') { if (cycleSort()) { e.preventDefault(); return; } }
     if (e.key === 'D') { if (flipSortDirection()) { e.preventDefault(); return; } }
     if (e.key === 'S' && !batchBarVisible()) {
       if (openSaveSearchDialog()) { e.preventDefault(); return; }
     }
-    if (handlePaginationKey(e)) { e.preventDefault(); return; }
     if (e.key === 'Home') { if (jumpGridCursor('first')) { e.preventDefault(); return; } }
     if (e.key === 'End')  { if (jumpGridCursor('last'))  { e.preventDefault(); return; } }
   }
 
-  // 'Delete' → delete current image (detail) or selection (gallery).
   if (e.key === 'Delete' || e.key === 'Del') {
     if (batchBarVisible()) {
       e.preventDefault();
       if (typeof batchDeleteSelected === 'function') batchDeleteSelected();
       return;
     }
-    if (clickFirstSelector(['#delete-image-btn'])) { e.preventDefault(); return; }
+    if (clickFirstSelector([
+      '#delete-image-btn',
+      '#tag-batch-bar:not([hidden]) #btn-batch-delete',
+      '#btn-detail-delete',
+    ])) { e.preventDefault(); return; }
   }
 
-  // Spacebar → play/pause the detail-page video, or toggle the focused
-  // thumbnail's selection on the gallery.
   if (e.key === ' ') {
     var vid = document.querySelector('.detail-video');
     if (vid) {
@@ -991,13 +1162,22 @@ document.addEventListener('keydown', function(e) {
       if (cb) {
         e.preventDefault();
         cb.checked = !cb.checked;
+        pickCheckbox(cb);
+        writeSelection();
         updateBatchBar();
       }
+      return;
+    }
+    // The tags listing keeps its selection wiring in its own page script, so
+    // the click is what carries the toggle there.
+    var focusedRow = document.querySelector('.tag-row.focused');
+    if (focusedRow) {
+      var rowBox = focusedRow.querySelector('.tag-select');
+      if (rowBox) { e.preventDefault(); rowBox.click(); }
     }
     return;
   }
 
-  // Backspace: detail-page back. Mirrors Esc's back step.
   if (e.key === 'Backspace' && isDetailPage()) {
     e.preventDefault();
     detailBack();
@@ -1010,7 +1190,6 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // o → open focused card (gallery) or open original in new tab (detail).
   if (e.key === 'o') {
     if (isDetailPage()) {
       var dlA = document.querySelector('.detail-actions a[download]');
@@ -1021,59 +1200,40 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
-  // h j k l: vim aliases.
-  // Detail page: h/k = prev image, l/j = next image.
-  // Gallery: grid-cursor moves (h ← l → k ↑ j ↓).
-  if (e.key === 'h' || e.key === 'l' || e.key === 'j' || e.key === 'k') {
+  // h j k l and the arrow keys route the same way: tag-focus cycle, then
+  // detail prev/next, then a gallery grid move (h ← l → k ↑ j ↓).
+  var navStep = {
+    h: [-1, 0], l: [1, 0], k: [0, -1], j: [0, 1],
+    ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+  }[e.key];
+  if (navStep) {
+    var dx = navStep[0], dy = navStep[1];
+    var forward = dx + dy > 0;
+    var arrow = e.key.startsWith('Arrow');
     if (focusedTagRow()) {
       e.preventDefault();
-      cycleTagFocus((e.key === 'l' || e.key === 'j') ? 1 : -1);
+      cycleTagFocus(forward ? 1 : -1);
       return;
     }
-    if (isDetailPage()) {
-      var dir = (e.key === 'l' || e.key === 'j') ? 'next' : 'prev';
-      if (navDetailArrow(dir, 'image')) { e.preventDefault(); return; }
-    } else if (isTagDetailPage()) {
-      var tdir = (e.key === 'l' || e.key === 'j') ? 'next' : 'prev';
-      if (navDetailArrow(tdir, 'tag')) { e.preventDefault(); return; }
-    } else if (isGalleryPage()) {
-      var dx = 0, dy = 0;
-      if (e.key === 'h') dx = -1;
-      else if (e.key === 'l') dx = 1;
-      else if (e.key === 'k') dy = -1;
-      else if (e.key === 'j') dy = 1;
-      if (moveGridCursor(dx, dy)) { e.preventDefault(); return; }
+    var kind = isDetailPage() ? 'image' : isTagDetailPage() ? 'tag' : '';
+    if (kind) {
+      // An arrow stops on a detail page whatever it hits, since up and
+      // down have nowhere to go there; j and k fall through so the rest
+      // of the map still sees them.
+      if ((!arrow || dy === 0) && navDetailArrow(forward ? 'next' : 'prev', kind)) {
+        e.preventDefault();
+        return;
+      }
+      if (arrow) return;
+    } else if (isGalleryPage() && moveGridCursor(dx, dy)) {
+      e.preventDefault();
+      return;
+    } else if (isTagsPage() && dy !== 0 && moveTagRowCursor(dy)) {
+      e.preventDefault();
+      return;
     }
   }
 
-  // Arrow keys: tag-focus mode > detail prev/next > gallery grid moves.
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-    if (focusedTagRow()) {
-      e.preventDefault();
-      cycleTagFocus(e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1);
-      return;
-    }
-    if (isDetailPage()) {
-      if (e.key === 'ArrowLeft') { if (navDetailArrow('prev', 'image')) { e.preventDefault(); } return; }
-      if (e.key === 'ArrowRight') { if (navDetailArrow('next', 'image')) { e.preventDefault(); } return; }
-      return;
-    }
-    if (isTagDetailPage()) {
-      if (e.key === 'ArrowLeft') { if (navDetailArrow('prev', 'tag')) { e.preventDefault(); } return; }
-      if (e.key === 'ArrowRight') { if (navDetailArrow('next', 'tag')) { e.preventDefault(); } return; }
-      return;
-    }
-    if (isGalleryPage()) {
-      var ax = 0, ay = 0;
-      if (e.key === 'ArrowLeft') ax = -1;
-      else if (e.key === 'ArrowRight') ax = 1;
-      else if (e.key === 'ArrowUp') ay = -1;
-      else if (e.key === 'ArrowDown') ay = 1;
-      if (moveGridCursor(ax, ay)) { e.preventDefault(); return; }
-    }
-  }
-
-  // Enter: tag-focus mode remove > gallery open focused card.
   if (e.key === 'Enter') {
     var focusedTag = focusedTagRow();
     if (focusedTag) {
@@ -1090,6 +1250,8 @@ document.addEventListener('keydown', function(e) {
     }
     var focusedCard = document.querySelector('.thumb-card.focused a');
     if (focusedCard) { window.location.href = focusedCard.href; return; }
+    var tagLink = document.querySelector('.tag-row.focused .btn-see-detail');
+    if (tagLink) { window.location.href = tagLink.href; return; }
   }
 });
 
@@ -1130,6 +1292,26 @@ function closeDialogFromSaveEvent(e) {
 }
 document.body.addEventListener('tagger-saved', closeDialogFromSaveEvent);
 document.body.addEventListener('token-saved', closeDialogFromSaveEvent);
+
+// The dialog's rows are a diff against the repository, which is a network
+// call away: the pop-in opens on the click so the wait is inside it rather
+// than in front of a button that looks untouched, and the modal is also
+// what stops a second click landing on the same fetch.
+function ptrContribOpen() {
+  var load = document.getElementById('ptr-contrib-loading');
+  if (load && !load.open) load.showModal();
+}
+
+// The answer takes the wait's place. Escape during the wait is a cancel:
+// the answer is dropped rather than popping up after the fact.
+function ptrContribOpened() {
+  var load = document.getElementById('ptr-contrib-loading');
+  if (load && !load.open) return;
+  if (load) load.close();
+  var dlg = document.getElementById('ptr-contrib-dialog');
+  if (dlg) dlg.showModal();
+  else htmx.trigger(document.body, 'ptr-contrib-closed');
+}
 
 // PTR contribute dialogs (image tags and tag relations). The dialog is
 // injected fresh on every open, so all wiring is delegated. Both dialogs
@@ -1323,12 +1505,9 @@ function taggerGalSelect(btn, on) {
   });
 }
 
-// Per-tagger threshold dialog: the per-row Reset link only does something
-// when the row differs from its catalog default, so hide it otherwise -
-// a row already at its default would otherwise show a no-op control. "At
-// default" means every number input equals its data-default (empty when
-// the catalog seeds none) and the checkbox matches its data-default-checked
-// state.
+// "At default" means every number input equals its data-default (empty
+// when the catalog seeds none) and the checkbox matches its
+// data-default-checked state.
 function threshRowAtDefault(row) {
   var atDefault = true;
   row.querySelectorAll('input[type=number]').forEach(function(inp) {
@@ -1508,6 +1687,8 @@ document.addEventListener('click', function(e) {
 // the selection shortcuts (a, f, r, t, m, i, Delete) on the next press.
 document.addEventListener('change', function(e) {
   if (!e.target.classList.contains('thumb-checkbox')) return;
+  pickCheckbox(e.target);
+  writeSelection();
   updateBatchBar();
   e.target.blur();
 });
@@ -1536,17 +1717,58 @@ document.addEventListener('click', function(e) {
   var header = (sel || uns).closest('.thumb-cluster-header');
   if (!header) return;
   var target = !!sel;
-  forEachClusterCheckbox(header, function(cb) { cb.checked = target; });
+  forEachClusterCheckbox(header, function(cb) { cb.checked = target; pickCheckbox(cb); });
+  writeSelection();
   updateBatchBar();
 });
 
-// While the batch bar is up, a plain left-click on a thumbnail toggles
-// its checkbox instead of opening the detail page. Modifier-clicks
-// (middle, ctrl/cmd, shift) keep the link's default so "open in tab"
-// still works. Esc / Cancel clears the selection and the link goes back
-// to navigating.
+// [Select all] takes the batch whole, tail included. A cluster's own time
+// range is a search of exactly its rows, so the ids come from the server and
+// join the pick where it stands - the listing on screen does not move.
 document.addEventListener('click', function(e) {
-  if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  var btn = e.target.closest ? e.target.closest('[data-cluster-all]') : null;
+  if (!btn) return;
+  e.preventDefault();
+  btn.disabled = true;
+  fetch('/internal/search/ids?q=' + encodeURIComponent(btn.dataset.clusterAll), {
+    headers: {'Accept': 'application/json'},
+  }).then(function(res) {
+    if (!res.ok) throw new Error('ids');
+    return res.json();
+  }).then(function(data) {
+    var ids = data.ids.map(String);
+    ids.forEach(function(v) {
+      if (pickedIDs.indexOf(v) === -1) pickedIDs.push(v);
+    });
+    var header = btn.closest('.thumb-cluster-header');
+    if (header) header.clusterAllIDs = ids;
+    selectAllMatching = false;
+    writeSelection();
+    syncSelectionBoxes();
+    updateBatchBar();
+    if (data.truncated) {
+      setFlashText(document.getElementById('gallery-flash'), 'err',
+        'Batch too large: the first ' + ids.length + ' are selected.');
+    }
+  }).catch(function() {
+    setFlashText(document.getElementById('gallery-flash'), 'err', 'Could not read the batch.');
+  }).finally(function() {
+    btn.disabled = false;
+  });
+});
+
+// The card a range is measured from: the last one clicked, so shift-click
+// paints the run between it and the next, the way the /tags rows do.
+var lastPickedCard = null;
+
+// While the grid is armed, a left-click on a thumbnail toggles its checkbox
+// instead of opening the detail page, shift-click takes the run since the
+// last one, and Ctrl/cmd does what a plain click does - a modifier that
+// opens a tab out of a selection is not what it means anywhere else. Alt
+// stays out of it (the band reads it as "subtract") and so does the middle
+// click. Esc / Cancel disarms and the link goes back to navigating.
+document.addEventListener('click', function(e) {
+  if (e.button !== 0 || e.altKey) return;
   var grid = document.getElementById('gallery-grid');
   if (!grid || !grid.classList.contains('batch-active')) return;
   var link = e.target.closest('.thumb-link');
@@ -1556,12 +1778,152 @@ document.addEventListener('click', function(e) {
   var cb = card.querySelector('.thumb-checkbox');
   if (!cb) return;
   e.preventDefault();
-  cb.checked = !cb.checked;
+  var cards = Array.prototype.slice.call(grid.querySelectorAll('.thumb-card'));
+  var to = cards.indexOf(card);
+  var from = lastPickedCard ? cards.indexOf(lastPickedCard) : -1;
+  if (e.shiftKey && from !== -1 && from !== to) {
+    // The anchor's own state is what the run is painted with, so a
+    // shift-click can clear a run as readily as it can take one.
+    var want = !cb.checked;
+    cards.slice(Math.min(from, to), Math.max(from, to) + 1).forEach(function(c) {
+      var box = c.querySelector('.thumb-checkbox');
+      if (!box) return;
+      box.checked = want;
+      pickCheckbox(box);
+    });
+  } else {
+    cb.checked = !cb.checked;
+    pickCheckbox(cb);
+  }
+  lastPickedCard = card;
+  writeSelection();
   updateBatchBar();
 });
 
-// In the inbox, hide a cluster's [Unselect] when nothing in it is selected
-// and [Select] when all of it is - the same sibling-walk as the click above.
+// Rubber-band selection. A run of images is the unit an import is judged
+// in, and ticking each one is the slow way to say so. A drag adds to the
+// page's picks and Alt takes them away, so several sweeps build one
+// selection and a drag nobody meant to start cannot wipe one. Picks on
+// other pages are untouched - the band only reaches what is on screen.
+var marquee = null;
+
+function marqueeCells(grid, origin) {
+  return Array.prototype.map.call(grid.querySelectorAll('.thumb-card'), function(card) {
+    var r = card.getBoundingClientRect();
+    return {
+      cb: card.querySelector('.thumb-checkbox'),
+      x: r.left - origin.left, y: r.top - origin.top, w: r.width, h: r.height,
+    };
+  });
+}
+
+function marqueePaint() {
+  var m = marquee;
+  var x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+  var w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+  if (!m.box) {
+    m.box = document.createElement('div');
+    m.box.className = 'marquee';
+    m.grid.appendChild(m.box);
+  }
+  m.box.style.left = x + 'px';
+  m.box.style.top = y + 'px';
+  m.box.style.width = w + 'px';
+  m.box.style.height = h + 'px';
+  m.cells.forEach(function(c, i) {
+    if (!c.cb) return;
+    var hit = !(c.x > x + w || c.x + c.w < x || c.y > y + h || c.y + c.h < y);
+    var on = m.mode === 'add' ? (m.was[i] || hit) : (m.was[i] && !hit);
+    if (c.cb.checked !== on) {
+      c.cb.checked = on;
+      pickCheckbox(c.cb);
+    }
+  });
+  updateBatchBar();
+}
+
+document.addEventListener('mousedown', function(e) {
+  if (e.button !== 0 || window.matchMedia('(pointer: coarse)').matches) return;
+  if (!e.target.closest) return;
+  var grid = e.target.closest('.thumb-grid');
+  // The checkbox and the cluster buttons are controls of their own; the
+  // card's link is not, or the band could only start in the gaps.
+  if (!grid || e.target.closest('button, input')) return;
+  var origin = grid.getBoundingClientRect();
+  marquee = {
+    grid: grid, box: null, moved: false,
+    x0: e.clientX - origin.left, y0: e.clientY - origin.top,
+    x1: e.clientX - origin.left, y1: e.clientY - origin.top,
+    mode: e.altKey ? 'sub' : 'add',
+    cells: marqueeCells(grid, origin),
+  };
+  marquee.was = marquee.cells.map(function(c) { return !!(c.cb && c.cb.checked); });
+  // Without this the drag turns into a native link drag or a text selection.
+  e.preventDefault();
+  document.body.classList.add('marquee-active');
+});
+
+document.addEventListener('mousemove', function(e) {
+  if (!marquee) return;
+  // Re-read the origin every move so a grid that scrolled under the pointer
+  // keeps the band anchored to the cards rather than to the viewport.
+  var origin = marquee.grid.getBoundingClientRect();
+  marquee.x1 = e.clientX - origin.left;
+  marquee.y1 = e.clientY - origin.top;
+  if (Math.abs(marquee.x1 - marquee.x0) > 4 || Math.abs(marquee.y1 - marquee.y0) > 4) {
+    marquee.moved = true;
+  }
+  // Nothing is painted until the pointer clears the threshold: a click carries
+  // a pixel or two of hand movement, and a band that thin in 'set' mode drops
+  // every pick outside it.
+  if (!marquee.moved) return;
+  var content = document.getElementById('content');
+  if (content) {
+    var cr = content.getBoundingClientRect();
+    if (e.clientY < cr.top + 40) content.scrollTop -= 12;
+    else if (e.clientY > cr.bottom - 40) content.scrollTop += 12;
+  }
+  marqueePaint();
+});
+
+document.addEventListener('mouseup', function() {
+  if (!marquee) return;
+  var moved = marquee.moved;
+  if (marquee.box) marquee.box.remove();
+  marquee = null;
+  document.body.classList.remove('marquee-active');
+  writeSelection();
+  updateBatchBar();
+  // The release fires a click on whatever card is under it, which would
+  // undo the last cell the band took.
+  if (moved) marqueeSwallowUntil = Date.now() + 100;
+});
+
+// Set by a drag that actually moved; the click handlers above read it.
+var marqueeSwallowUntil = 0;
+
+document.addEventListener('click', function(e) {
+  if (Date.now() >= marqueeSwallowUntil) return;
+  if (!e.target.closest || !e.target.closest('.thumb-grid')) return;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+
+// The ids [Select all] would add, when they are known: the cluster's own
+// rows when the batch is wholly on this page, else whatever the endpoint
+// answered on an earlier click. Null while a batch with a tail elsewhere
+// has not been taken yet - the page cannot tell what it is missing.
+function clusterAllIDs(header) {
+  if (header.clusterAllIDs) return header.clusterAllIDs;
+  if (!header.hasAttribute('data-cluster-whole')) return null;
+  var ids = [];
+  forEachClusterCheckbox(header, function(cb) { ids.push(cb.value); });
+  return ids;
+}
+
+// In the inbox, hide a cluster's [Unselect] when nothing in it is selected,
+// [Select] when all of it is, and [Select all] once the pick already holds
+// the whole batch - the same sibling-walk as the click above.
 function updateClusterButtons() {
   document.querySelectorAll('.thumb-cluster-header[data-cluster-start]').forEach(function(header) {
     var total = 0, checked = 0;
@@ -1571,84 +1933,268 @@ function updateClusterButtons() {
     });
     var sel = header.querySelector('[data-cluster-select]');
     var uns = header.querySelector('[data-cluster-unselect]');
+    var all = header.querySelector('[data-cluster-all]');
     if (sel) sel.hidden = total > 0 && checked === total;
     if (uns) uns.hidden = checked === 0;
+    if (all) {
+      var ids = clusterAllIDs(header);
+      all.hidden = !!ids && ids.length > 0 && ids.every(function(id) {
+        return pickedIDs.indexOf(id) !== -1;
+      });
+    }
+  });
+}
+
+// The selection is a list of ids rather than whatever is ticked right now:
+// paging the grid swaps the checkboxes away, and a group worth acting on -
+// a collection, an import batch - routinely spans pages. Pick order is the
+// order a job that numbers its scope walks it in, so an id already on the
+// list keeps its place.
+var pickedIDs = [];
+// Set by the "Select all N matching" escalation: the ids stop being the
+// scope and the server re-resolves the query instead.
+var selectAllMatching = false;
+// Arms the grid before there is anything picked, so the first image is taken
+// by a click rather than by finding its checkbox. A selection arms it too.
+var selectMode = false;
+
+// selectionArmed is the one state the grid, the bar and the toggle read: the
+// mode the operator asked for, or a selection that put them in it anyway.
+function selectionArmed() {
+  return selectMode || selectAllMatching || pickedIDs.length > 0;
+}
+
+// Leaving the mode takes the selection with it - the toggle reads as armed
+// once anything is picked, so switching it off has to mean what it shows.
+function toggleSelectMode() {
+  if (selectionArmed()) {
+    selectMode = false;
+    clearSelection();
+    return;
+  }
+  selectMode = true;
+  updateBatchBar();
+}
+
+// Records one box's state. Callers persist once they are done, so ticking a
+// whole page is a single write rather than one per thumbnail.
+function pickCheckbox(cb) {
+  var at = pickedIDs.indexOf(cb.value);
+  if (cb.checked) {
+    if (at === -1) pickedIDs.push(cb.value);
+  } else if (at !== -1) {
+    pickedIDs.splice(at, 1);
+  }
+  // Any single toggle is the operator narrowing again, which the whole-search
+  // scope can no longer describe.
+  selectAllMatching = false;
+}
+
+// syncSelectionBoxes ticks the boxes the fresh grid arrived with from the
+// list. Every box is set, not just the ones the list names: a browser that
+// keeps form state across a reload restores it by position, which after an
+// action that dropped rows points at whichever rows moved up into their
+// places. A whole-search scope reaches every row on screen, so it takes
+// their ids too - which is what a toggle narrows back to.
+function syncSelectionBoxes() {
+  document.querySelectorAll('.thumb-checkbox').forEach(function(cb) {
+    var picked = pickedIDs.indexOf(cb.value) !== -1;
+    if (selectAllMatching && !picked) {
+      pickedIDs.push(cb.value);
+      picked = true;
+    }
+    cb.checked = picked;
   });
 }
 
 function updateBatchBar() {
-  const checked = document.querySelectorAll('.thumb-checkbox:checked');
+  const onPage = document.querySelectorAll('.thumb-checkbox:checked').length;
+  const total = document.querySelectorAll('.thumb-checkbox').length;
+  const active = selectAllMatching || pickedIDs.length > 0;
+  const armed = selectionArmed();
   const bar = document.getElementById('batch-bar');
   const pluginBar = document.getElementById('plugin-batch-bar');
   const grid = document.getElementById('gallery-grid');
-  if (bar) bar.classList.toggle('visible', checked.length > 0);
-  if (pluginBar) pluginBar.classList.toggle('visible', checked.length > 0);
-  if (grid) grid.classList.toggle('batch-active', checked.length > 0);
+  if (bar) {
+    // Up with the mode, lit with the selection: the .visible class is what
+    // the keyboard router reads to know there is a scope to act on.
+    bar.hidden = !armed;
+    bar.classList.toggle('visible', active);
+  }
+  // Up with the mode like the bar above it; lit only while the scope is a
+  // list of ids it can post, which the whole-search escalation is not.
+  if (pluginBar) {
+    pluginBar.hidden = !armed;
+    pluginBar.classList.toggle('visible', active && !selectAllMatching);
+  }
+  if (grid) grid.classList.toggle('batch-active', armed);
+  const modeBtn = document.getElementById('select-mode-btn');
+  if (modeBtn) modeBtn.setAttribute('aria-pressed', String(armed));
+  const matching = matchingTotal();
   const countEl = document.getElementById('batch-count');
-  if (countEl) countEl.textContent = checked.length + ' selected';
-  // Hide the header's Actions chooser while a selection is active so users
-  // aiming for the batch-bar's selection-scoped buttons can't misclick onto
-  // the search-scoped variants.
-  const actions = document.getElementById('actions-btn');
-  if (actions) actions.hidden = checked.length > 0;
+  if (countEl) {
+    // Beside the match count now, so it says nothing until there is one.
+    countEl.hidden = !active;
+    countEl.textContent = selectAllMatching
+      ? 'All ' + matching + ' matching selected'
+      : pickedIDs.length + ' selected' +
+        (pickedIDs.length > onPage ? ' · ' + onPage + ' on this page' : '');
+  }
+  // Offered once the page is exhausted, so it reads as the next step up from
+  // Select page rather than a competing way to pick.
+  const escalate = document.getElementById('batch-select-all-matching');
+  if (escalate) {
+    escalate.textContent = 'Select all ' + matching + ' matching';
+    escalate.hidden = selectAllMatching || total === 0 || onPage < total || matching <= total;
+  }
   updateClusterButtons();
 }
 
+// matchingTotal reads the status bar rather than a template value: the count
+// is swapped out of band on every htmx search, and the bar is not.
+function matchingTotal() {
+  var el = document.querySelector('.result-count');
+  var m = el && el.textContent.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 function clearSelection() {
-  document.querySelectorAll('.thumb-checkbox:checked').forEach(function(cb) { cb.checked = false; });
+  pickedIDs = [];
+  selectAllMatching = false;
+  writeSelection();
+  syncSelectionBoxes();
   updateBatchBar();
 }
 
+// selectAll takes the page, which is as far as the checkboxes reach; the
+// escalation beside it is what takes the rest of the search.
 function selectAll() {
-  document.querySelectorAll('.thumb-checkbox').forEach(function(cb) { cb.checked = true; });
+  document.querySelectorAll('.thumb-checkbox').forEach(function(cb) {
+    cb.checked = true;
+    pickCheckbox(cb);
+  });
+  writeSelection();
   updateBatchBar();
 }
 
-// stashSelection carries the checked ids across the reload an action ends
-// in - a plugin relay answering refresh: true, or a batch job's completion.
-// The stash names the page it was made on and is consumed by the next load,
-// so one left behind by an action that never reloaded cannot re-select on
-// some other listing. The window is minutes rather than stashActionFlash's
-// seconds: a batch reloads when its background job finishes, which over a
-// few thousand images is a while after the click.
+// Flips the page, not the search: the boxes are what the operator just
+// judged, and ids picked on other pages are not on screen to reconsider.
+// Triage runs pick the rejects, act, invert, act on what is left.
+function invertSelection() {
+  document.querySelectorAll('.thumb-checkbox').forEach(function(cb) {
+    cb.checked = !cb.checked;
+    pickCheckbox(cb);
+  });
+  writeSelection();
+  updateBatchBar();
+}
+
+// The stash keeps the selection across a page flip, a detail-page detour and
+// the reload a finished job ends in. It names the listing it was made on -
+// the query, not the page - so paging keeps it and searching drops it,
+// rather than a set built on one listing re-selecting on an unrelated one.
+// The window is minutes: a batch reloads when its background job finishes,
+// which over a few thousand images is a while after the click.
 var selectionStashMs = 300000;
 
-function stashSelection(ids) {
+// A gallery is an id space of its own, so every stashed pick is named by the
+// one it was made in: after a switch the same URL is a different library.
+function activeGallery() {
+  return (document.body && document.body.dataset.gallery) || '';
+}
+
+// The query alone, from the URL rather than the search box: the box can hold
+// something typed but not submitted, while the URL is what the grid on screen
+// was built from. Sort and page are deliberately out - they reorder and slice
+// the same images, and a pick worth keeping outlives both.
+function selectionKey() {
+  return activeGallery() + location.pathname + '?q=' + (new URLSearchParams(location.search).get('q') || '');
+}
+
+function writeSelection() {
   try {
     sessionStorage.setItem('monbooru_selection', JSON.stringify(
-      {ids: ids, url: location.pathname + location.search, t: Date.now()}));
+      {ids: pickedIDs, all: selectAllMatching, url: selectionKey(), t: Date.now()}));
   } catch (e) {}
 }
 
-document.addEventListener('DOMContentLoaded', function() {
+// readSelection adopts the stash when it belongs to the listing on screen
+// and empties the selection when it does not, which is what makes a page
+// flip keep the pick and a new search drop it.
+function readSelection() {
   var raw = null;
   try { raw = sessionStorage.getItem('monbooru_selection'); } catch (e) {}
-  var ids = [];
+  var stash = null;
   if (raw) {
-    try { sessionStorage.removeItem('monbooru_selection'); } catch (e) {}
-    var stash = null;
     try { stash = JSON.parse(raw); } catch (e) {}
-    if (stash && stash.ids && Date.now() - stash.t <= selectionStashMs &&
-        stash.url === location.pathname + location.search) {
-      ids = stash.ids;
-    }
   }
-  // Every box is set from the stash, not just the ones it names: a browser
-  // that keeps form state across a reload restores it by position, which
-  // after an action that dropped rows from the listing points at whichever
-  // rows moved up into their places.
-  document.querySelectorAll('.thumb-checkbox, .tag-select').forEach(function(cb) {
-    cb.checked = ids.indexOf(cb.value) !== -1;
+  if (!stash || !stash.ids || Date.now() - stash.t > selectionStashMs ||
+      stash.url !== selectionKey()) {
+    pickedIDs = [];
+    selectAllMatching = false;
+    return;
+  }
+  pickedIDs = stash.ids;
+  selectAllMatching = !!stash.all;
+}
+
+// stashSelection carries the /tags page's checked rows across the reload an
+// action ends in. One shot, and pinned to the listing it was made on, so one
+// left behind by an action that never reloaded cannot re-select elsewhere.
+// The gallery has no use for it: its own selection is persisted on every
+// change and survives the reload on its own.
+function stashSelection(ids) {
+  try {
+    sessionStorage.setItem('monbooru_tag_selection', JSON.stringify(
+      {ids: ids, url: tagSelectionKey(), t: Date.now()}));
+  } catch (e) {}
+}
+
+function tagSelectionKey() {
+  return activeGallery() + location.pathname + location.search;
+}
+
+function takeTagStash() {
+  var raw = null;
+  try { raw = sessionStorage.getItem('monbooru_tag_selection'); } catch (e) {}
+  if (!raw) return [];
+  try { sessionStorage.removeItem('monbooru_tag_selection'); } catch (e) {}
+  var stash = null;
+  try { stash = JSON.parse(raw); } catch (e) {}
+  if (!stash || !stash.ids || Date.now() - stash.t > selectionStashMs ||
+      stash.url !== tagSelectionKey()) {
+    return [];
+  }
+  return stash.ids;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  readSelection();
+  syncSelectionBoxes();
+  // Every box is set, not just the ones the stash names: a browser that keeps
+  // form state across a reload restores it by position, which after an action
+  // that dropped rows points at whichever rows moved up into their places.
+  var tagIDs = takeTagStash();
+  document.querySelectorAll('.tag-select').forEach(function(cb) {
+    cb.checked = tagIDs.indexOf(cb.value) !== -1;
   });
-  // The bars are derived from the checkboxes and only ever recomputed on a
-  // change event, so a load that arrives with boxes already ticked needs the
-  // derivation run once here or the selection sits there with no bar.
+  // The bars are derived from the list and only ever recomputed on a change
+  // event, so a load that arrives with one needs the derivation run once here
+  // or the selection sits there with no bar.
   updateBatchBar();
   if (typeof updateTagBatchBar === 'function') updateTagBatchBar();
 });
 
-// sidebarTagRows lists the image's tags as the detail sidebar renders
-// them, deepest-nested included.
+// The escalation hands the scope to the server: no ids travel, the query
+// does, so what runs is the search as it stands rather than a snapshot.
+document.addEventListener('click', function(e) {
+  if (!e.target.closest || !e.target.closest('#batch-select-all-matching')) return;
+  e.preventDefault();
+  selectAllMatching = true;
+  writeSelection();
+  updateBatchBar();
+});
+
 function sidebarTagRows() {
   return Array.from(document.querySelectorAll('#tag-groups .tag-entry[data-tag-id]'));
 }
@@ -1703,9 +2249,9 @@ function batchDeleteSelected() {
 }
 
 // openSaveSearchDialog prefills the save-search dialog from the current
-// search input, then opens it. Shared by the S-key shortcut and the
-// Actions chooser's Save entry. Returns false when the dialog isn't on
-// the page so the key handler can fall through.
+// search input, then opens it. Shared by the S-key shortcut and the header
+// button. Returns false when the dialog isn't on the page so the key
+// handler can fall through.
 function openSaveSearchDialog() {
   var dlg = document.getElementById('save-search-dialog');
   if (!dlg) return false;
@@ -1738,38 +2284,6 @@ function refreshJobStatus() {
   window.htmx.process(el);
   window.htmx.ajax('GET', '/internal/job/status', {target: '#job-status', swap: 'outerHTML'});
 }
-
-// Close a dialog and, if it was opened from another dialog (data-return-to
-// set by the opener), re-open the parent. Used by sub-dialog Cancel buttons
-// reachable from the Actions chooser so cancel/escape pops one level
-// instead of collapsing the whole stack.
-function closeDialogAndRestoreParent(dialogId) {
-  var d = document.getElementById(dialogId);
-  if (!d) return;
-  var parentId = d.dataset.returnTo;
-  d.close();
-  if (parentId) {
-    var parent = document.getElementById(parentId);
-    if (parent && typeof parent.showModal === 'function') parent.showModal();
-  }
-}
-
-// Escape on a modal <dialog> raises the `cancel` event via the browser's
-// close watcher, regardless of whether an input inside the dialog is
-// focused. We listen in the capture phase because the cancel event
-// doesn't bubble. When the dialog has data-return-to set (chooser opened
-// it), preventDefault keeps the dialog open just long enough for
-// closeDialogAndRestoreParent to swap the chooser back in. Without this
-// hook, the keydown branch alone misses the input-focused case (the
-// user's first Escape only blurs the input, then the browser's default
-// close fires on the next tick before any JS can re-open the parent).
-document.addEventListener('cancel', function(e) {
-  var d = e.target;
-  if (!d || !d.tagName || d.tagName !== 'DIALOG') return;
-  if (!d.dataset.returnTo) return;
-  e.preventDefault();
-  closeDialogAndRestoreParent(d.id);
-}, true);
 
 // Shared confirmation dialog: replaces native confirm() and intercepts
 // hx-confirm via the htmx:confirm event listener below. The triggering
@@ -1860,6 +2374,23 @@ document.addEventListener('click', function(e) {
   setTimeout(function() { input.focus(); input.select(); }, 0);
 });
 
+// A derivative graph hangs one action per incoming edge off the node the
+// edge lands on - a [review again] on the browse card, an [unlink source]
+// on the image's own page - and the id in the label is otherwise all that
+// tells apart the several a fan-in carries. Pointing at either end lights
+// the other.
+['mouseover', 'mouseout', 'focusin', 'focusout'].forEach(function(type) {
+  document.addEventListener(type, function(e) {
+    var el = e.target.closest ? e.target.closest('[data-edge]') : null;
+    var graph = el && el.closest('.deriv-graph');
+    if (!graph) return;
+    var on = type === 'mouseover' || type === 'focusin';
+    graph.querySelectorAll('[data-edge="' + el.dataset.edge + '"]').forEach(function(peer) {
+      peer.classList.toggle('deriv-edge-lit', on);
+    });
+  });
+});
+
 // "Add a relation..." chip in the detail-page Relations panel opens
 // the manual relation-add dialog with the current image pre-filled.
 // Each open resets the form so a chain of adds doesn't keep the prior
@@ -1910,7 +2441,6 @@ function onExternalEditResponse(event, dialogID) {
   if (dlg) dlg.close();
 }
 
-// toggleAnnotations shows/hides the annotation-box overlay on the detail image.
 function toggleAnnotations(btn) {
   var media = btn.closest('.detail-media');
   if (!media) return;
@@ -1931,11 +2461,8 @@ function findActionFlashSlot() {
   return null;
 }
 
-// showActionFlash writes html into the first available flash slot and
-// auto-clears after 5 s. Stale content is replaced on every call so
-// back-to-back actions don't pile up. kind picks the flash-ok / flash-err
-// palette; html is inserted as-is when wrapped in a .flash element,
-// otherwise wrapped.
+// Every call restamps the token, so an earlier call's timer finds a stale
+// one and leaves the newer message standing.
 function showActionFlash(html, kind) {
   var slot = findActionFlashSlot();
   if (!slot || !html) return;
@@ -1952,8 +2479,6 @@ function showActionFlash(html, kind) {
   }, 5000);
 }
 
-// escapeHTML makes free text (tag names, server error text) safe for the
-// innerHTML-based flash slots.
 function escapeHTML(s) {
   var d = document.createElement('div');
   d.textContent = s;
@@ -2027,6 +2552,18 @@ function onRelationEditResponse(event) {
   var src = document.getElementById('relation-edit-error');
   if (!src) return;
   var overwrite = document.getElementById('relation-edit-overwrite-btn');
+  // Both answers the server writes - added, and refused - come back 200
+  // with a body for the slot, so the body is what tells them apart. A
+  // request that swaps nothing (dropped connection, 5xx) leaves the slot
+  // as it was, and reading it there reports a conflict nobody hit while
+  // the dialog sits open saying nothing at all.
+  var answered = event && event.detail && event.detail.successful &&
+    src.querySelector('.flash-ok, .flash-err');
+  if (!answered) {
+    if (overwrite) overwrite.hidden = true;
+    src.innerHTML = '<div class="flash flash-err">The relation was not saved.</div>';
+    return;
+  }
   var success = src.querySelector('.flash-ok');
   if (!success) {
     // Conflict: surface the Overwrite affordance so the operator can
@@ -2037,8 +2574,6 @@ function onRelationEditResponse(event) {
     //     (pair-shaped conflict between THIS pair)
     //   - "already has a version edge" -> Replace existing version edge
     //     (one side is already on a version chain with a third image)
-    //   - "already has a source" -> Replace existing source
-    //     (the chosen derivative already points at a different source)
     var err = src.querySelector('.flash-err');
     if (overwrite) {
       var msg = err ? (err.textContent || '') : '';
@@ -2047,9 +2582,6 @@ function onRelationEditResponse(event) {
         overwrite.hidden = false;
       } else if (/already has a version edge/i.test(msg)) {
         overwrite.textContent = 'Replace existing version edge';
-        overwrite.hidden = false;
-      } else if (/already has a source/i.test(msg)) {
-        overwrite.textContent = 'Replace existing source';
         overwrite.hidden = false;
       } else {
         overwrite.hidden = true;
@@ -2097,6 +2629,33 @@ document.addEventListener('click', function(e) {
   if (layout) setSidebarCollapsed(!layout.classList.contains('sidebar-collapsed'));
 });
 
+// The size is a cookie the server reads, so it lands on the next render
+// rather than this one. Page 1 because the number in the URL indexes a
+// listing sliced at the old size.
+function setPageSize(size) {
+  postForm('/internal/view-prefs', {page_size: size}, {
+    onOK: function() {
+      var u = new URL(location.href);
+      u.searchParams.set('page', '1');
+      location.href = u.toString();
+    }
+  });
+}
+
+// Cell size is pure CSS, so it applies now; the cookie only decides how the
+// next render arrives.
+function setThumbSize(size) {
+  var grid = document.querySelector('.thumb-grid');
+  if (grid) {
+    grid.classList.toggle('thumb-sm', size === 's');
+    grid.classList.toggle('thumb-lg', size === 'l');
+  }
+  document.querySelectorAll('#thumb-size-ramp button').forEach(function(b) {
+    b.setAttribute('aria-pressed', String(b.dataset.thumb === size));
+  });
+  postForm('/internal/view-prefs', {thumb: size});
+}
+
 // The cookie is what the server reads to render the next page already
 // collapsed; the class is what the current page needs right now.
 function setSidebarCollapsed(collapsed) {
@@ -2117,7 +2676,6 @@ function revealSidebarFor(el) {
   if (el && el.closest && el.closest('#sidebar')) setSidebarCollapsed(false);
 }
 
-// Folder tree: expand/collapse with cookie persistence
 function getFolderCookie() {
   var m = document.cookie.match(/monbooru_folders=([^;]*)/);
   if (!m) return new Set();
@@ -2295,7 +2853,7 @@ function applyTagSuggest(btn) {
   }
 }
 
-// Label suggest (move-image/move-selected folder dialogs; detail and batch
+// Label suggest (place-image/batch-place folder dialogs; detail and batch
 // collection/source dialogs): copies the picked value into the dropdown's
 // nearest text input and keeps focus so the user can keep typing. key names
 // the dataset field carrying the value ('folderPath' or 'series').
@@ -2332,28 +2890,40 @@ function insertToken(btn) {
   input.dispatchEvent(new Event('input', {bubbles: true}));
 }
 
-// namePreviewVals is the hx-vals shape a batch dialog's preview slot
-// posts: what is typed, the surface it belongs to, and the head of the
-// scope it would apply to. A search scope has no checked ids, so the
-// first rendered thumbnails stand in - they are the head of the same
+// namePreviewVals is the hx-vals shape a batch dialog's preview slot posts:
+// both halves of the destination, the surface they belong to, and the head
+// of the scope they would apply to. A search scope has no checked ids, so
+// the first rendered thumbnails stand in - they are the head of the same
 // order the job walks.
-function namePreviewVals(inputId, scope, scopeId) {
-  var input = document.getElementById(inputId);
-  var scopeEl = document.getElementById(scopeId);
+function namePreviewVals(prefix, scope) {
+  var scopeEl = document.getElementById(prefix + '-scope');
   var kind = scopeEl && scopeEl.value ? scopeEl.value : 'selection';
   var ids = kind === 'search'
     ? Array.prototype.map.call(document.querySelectorAll('.thumb-card'),
         function(c) { return c.dataset.id; })
     : selectedImageIds();
+  var slot = document.getElementById(prefix + '-preview');
+  var rows = parseInt(slot && slot.dataset.rows, 10) || 5;
   return {
-    tmpl: input ? input.value : '',
+    folder: document.getElementById(prefix + '-folder').value,
+    name: document.getElementById(prefix + '-name').value,
     scope: scope,
-    ids: ids.slice(0, 3).join(','),
+    rows: rows,
+    ids: ids.slice(0, rows).join(','),
     total: scopeCount(kind, null, null)
   };
 }
 
-// Search suggest: apply selected suggestion to search input
+// showMoreNamePreview widens the window the preview slot asks for and
+// re-runs it. A click rather than a keystroke, because a {md5} template
+// hashes files that carry no digest yet.
+function showMoreNamePreview(btn) {
+  var slot = btn.closest('[hx-get]');
+  if (!slot) return;
+  slot.dataset.rows = btn.dataset.rows;
+  if (window.htmx) window.htmx.trigger(slot, 'preview');
+}
+
 function applySearchSuggest(tagName) {
   var si = document.getElementById('search-input');
   if (!si) return;
@@ -2470,7 +3040,6 @@ document.addEventListener('click', function (e) {
   if (open) open.close();
 });
 
-// Auto-reload gallery/tags after job completes; auto-clear status after 30s
 var _jobAutoClearTimer = null;
 // FinishedAt the current auto-clear timer was armed against; re-armed on newer
 // surface events so rolling watcher activity doesn't trip the dismiss mid-batch
@@ -2523,12 +3092,16 @@ function armGalleryReload() {
 document.body.addEventListener('htmx:afterSettle', function(e) {
   var el = e.detail.elt;
 
-  // When the gallery grid is swapped (pagination, search, or job reload),
-  // reset batch selection state to match the fresh (all-unchecked) checkboxes.
-  // The swap wipes any .focused class; reapply it from the URL hash so the
-  // arrow-key cursor doesn't vanish when a post-job refresh races the user.
+  // When the gallery grid is swapped (pagination, search, or job reload), put
+  // the selection back on the fresh checkboxes. htmx has already pushed the
+  // new URL, so the listing key decides: a page flip keeps the pick, a search
+  // drops it. The swap wipes any .focused class; reapply it from the URL hash
+  // so the arrow-key cursor doesn't vanish when a post-job refresh races the
+  // user.
   if (el && el.id === 'gallery-grid') {
-    clearSelection();
+    readSelection();
+    syncSelectionBoxes();
+    updateBatchBar();
     restoreGalleryFocusFromHash();
     initInboxUpload();
     return;
@@ -2658,8 +3231,9 @@ document.body.addEventListener('htmx:afterSettle', function(e) {
 
     // Gallery page: reload grid + lift the job summary into the inline
     // flash slot so the user sees the result without having to scan the
-    // top-right job-status widget.
-    var grid = document.getElementById('gallery-grid');
+    // top-right job-status widget. A check changed nothing, so refreshing
+    // the grid would only cost the selection it was run against.
+    var grid = jobType === 'check' ? null : document.getElementById('gallery-grid');
     if (grid) {
       var doneEl = el.querySelector('.job-done');
       if (doneEl) showActionFlash(escapeHTML(doneEl.textContent || ''), 'ok');
@@ -2691,16 +3265,7 @@ function getCSRFToken() {
 // (selection scope). Returns the resolved count so callers can early-
 // return on an empty selection.
 function scopeCount(scope, countEl, nounEl) {
-  var n = 0;
-  if (scope === 'selection') {
-    n = document.querySelectorAll('.thumb-checkbox:checked').length;
-  } else {
-    var rcEl = document.querySelector('.result-count');
-    if (rcEl) {
-      var m = rcEl.textContent.match(/(\d+)/);
-      if (m) n = parseInt(m[1], 10);
-    }
-  }
+  var n = scope === 'selection' ? pickedIDs.length : matchingTotal();
   if (countEl) countEl.textContent = n;
   if (nounEl) {
     var suffix = n === 1 ? 'image' : 'images';
@@ -2709,22 +3274,26 @@ function scopeCount(scope, countEl, nounEl) {
   return n;
 }
 
-// searchScopeParts returns the query/sort/order body fragment used by
-// every search-scoped batch endpoint.
+// The listing on screen, not the form: the box can hold text typed but never
+// submitted, while the URL is what the grid and its match count were built from.
 function searchScopeParts() {
-  var si = document.getElementById('search-input');
+  var params = new URLSearchParams(location.search);
   var sortEl = document.getElementById('search-sort');
   var orderEl = document.querySelector('#search-form select[name="order"]');
-  return ['q=' + encodeURIComponent(si ? si.value : ''),
-          'sort=' + encodeURIComponent(sortEl ? sortEl.value : 'newest'),
-          'order=' + encodeURIComponent(orderEl ? orderEl.value : 'desc')];
+  var parts = ['q=' + encodeURIComponent(params.get('q') || ''),
+               'sort=' + encodeURIComponent(params.get('sort') || (sortEl ? sortEl.value : 'newest')),
+               'order=' + encodeURIComponent(params.get('order') || (orderEl ? orderEl.value : 'desc'))];
+  // A random sort's order is the seed's; without it a job that numbers its
+  // scope by position walks a different shuffle from the one on screen.
+  var seed = params.get('seed');
+  if (seed) parts.push('seed=' + encodeURIComponent(seed));
+  return parts;
 }
 
-// selectedImageIds returns the checked thumbs' raw ids, for callers that
-// build their own request body.
+// selectedImageIds returns the picked ids, for callers that build their own
+// request body. The list, not the checkboxes: the pick reaches past the page.
 function selectedImageIds() {
-  return Array.prototype.map.call(
-    document.querySelectorAll('.thumb-checkbox:checked'), function(cb) { return cb.value; });
+  return pickedIDs.slice();
 }
 
 // selectionScopeIds returns the checked-thumb id parts. Returns null
@@ -2755,10 +3324,6 @@ function relayPlugin(btn) {
   var pinned = btn.closest('[data-image-id]');
   var ids = pinned ? [pinned.dataset.imageId] : selectedImageIds();
   if (!ids.length || !window.htmx) return;
-  // A peer that edits in place asks for a refresh, which reloads the gallery
-  // and the selection its scope came from; carry it so a second pass over the
-  // same images doesn't start by picking them all again.
-  if (!pinned) stashSelection(ids);
   window.htmx.ajax('POST', '/internal/plugin/relay', {
     swap: 'none',
     values: {_csrf: getCSRFToken(), plugin: btn.dataset.plugin, button: btn.dataset.button, ids: ids}
@@ -2804,10 +3369,11 @@ function closePluginPage() {
   if (dlg && dlg.open) dlg.close();
 }
 
-// runBatchOp fires the named endpoint, closing the dialog and refreshing
-// job-status on success. opts: endpoint, scope, params (array of
+// The selection survives by default - a scope the operator built is usually
+// worth more than one action. opts: endpoint, scope, params (array of
 // already-encoded "k=v" parts not including _csrf or scope), dialogId,
-// flashId, failMsg.
+// flashId, failMsg, consumesScope (the rows are gone afterwards, so keeping
+// them picked would only misreport the count).
 function runBatchOp(opts) {
   var flash = document.getElementById(opts.flashId);
   if (flash) flash.innerHTML = '';
@@ -2817,11 +3383,7 @@ function runBatchOp(opts) {
     flashId: opts.flashId,
     failMsg: opts.failMsg || 'Action failed.',
     onOK: function() {
-      // The job's completion reloads the page, so the selection is carried
-      // across it rather than dropped: a scope the operator built is usually
-      // worth more than one action. Deleted or moved-away rows simply have
-      // no checkbox left to restore.
-      if (opts.scope === 'selection') stashSelection(selectedImageIds());
+      if (opts.consumesScope) clearSelection();
       _pendingGalleryReload = true;
       refreshJobStatus();
     }
@@ -2837,14 +3399,15 @@ function runBatchOp(opts) {
 //   radio         - selector of the radio re-checked to its default
 //   clearIds      - element ids emptied on open (inputs get value='',
 //                   suggest dropdowns innerHTML='')
-//   clearReturnTo - drop any stale chooser back-link from a prior open;
-//                   pickBatchAction re-applies it on the chooser-open path
-//                   after this runs (shared batch-bar/chooser dialogs only)
 //   beforeShow    - hook run after the resets, before showModal
 //   focusId       - input focused after showModal
 function openBatchDialog(prefix, scope, opts) {
   opts = opts || {};
-  if (scope === 'selection' && document.querySelectorAll('.thumb-checkbox:checked').length === 0) return;
+  // An escalated bar is still clicked through the selection-scoped buttons,
+  // so the flip happens once here and every dialog reads the search scope it
+  // already knows how to post.
+  if (scope === 'selection' && selectAllMatching) scope = 'search';
+  if (scope === 'selection' && pickedIDs.length === 0) return;
   var n = scopeCount(scope, document.getElementById(opts.countId || prefix + '-count'),
                      document.getElementById(prefix + '-noun'));
   if (opts.requireMatches && scope === 'search' && n === 0) return;
@@ -2861,7 +3424,6 @@ function openBatchDialog(prefix, scope, opts) {
   var flash = document.getElementById(prefix + '-flash');
   if (flash) flash.innerHTML = '';
   var dlg = document.getElementById(prefix + '-dialog');
-  if (opts.clearReturnTo && dlg) delete dlg.dataset.returnTo;
   if (opts.beforeShow) opts.beforeShow();
   dlg.showModal();
   var focusEl = opts.focusId ? document.getElementById(opts.focusId) : null;
@@ -2973,6 +3535,28 @@ function postForm(url, params, opts) {
   }
 }
 
+// mirrorJobSummary copies the finished job's own words into a dialog slot.
+// A job reports in the topbar widget, which a modal backdrop dims, so a
+// dialog that stays open through one has to bring the answer to where the
+// operator is looking.
+function mirrorJobSummary(flashId) {
+  var status = document.getElementById('job-status');
+  if (!status || !status.parentNode) return;
+  var startedAt = status.dataset.finishedAt || '';
+  var obs = new MutationObserver(function() {
+    var now = document.getElementById('job-status');
+    if (!now || (now.dataset.finishedAt || '') === startedAt) return;
+    var done = document.getElementById('job-done-msg');
+    var failed = document.getElementById('job-error-msg');
+    if (!done && !failed) return;
+    obs.disconnect();
+    var node = done || failed;
+    setFlashText(document.getElementById(flashId), done ? 'ok' : 'err',
+                 node.getAttribute('title') || node.textContent);
+  });
+  obs.observe(status.parentNode, {childList: true, subtree: true});
+}
+
 function dismissJobStatus() {
   _lastReloadedFinishedAt = '';
   _lastJobProcessed = -1;
@@ -3035,8 +3619,8 @@ function handleSuggestKey(e, dropdownId, inputId) {
 var suggestPairs = {
   'search-suggest': {input: 'search-input', blurOnSubmit: true, clearOnEmpty: true},
   'tag-suggest-dropdown': {input: 'tag-input', clearOnEmpty: true},
-  'batch-move-suggest': {input: 'batch-move-folder'},
-  'move-image-suggest': {input: 'move-image-folder'},
+  'batch-place-suggest': {input: 'batch-place-folder'},
+  'place-image-suggest': {input: 'place-image-folder'},
   'batch-tag-suggest': {input: 'batch-tag-input', clearOnEmpty: true},
   'batch-strip-suggest': {input: 'batch-strip-input', clearOnEmpty: true},
   'source-suggest': {input: 'source-site-input'},

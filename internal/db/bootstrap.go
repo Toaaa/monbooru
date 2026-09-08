@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 
 	_ "embed"
@@ -69,6 +70,7 @@ func Bootstrap(db *DB) error {
 		 SELECT id, source, '', url FROM images
 		 WHERE (source != '' OR url != '') AND NOT EXISTS (SELECT 1 FROM image_sources)`)
 	b.ensureColumn("image_sources", "commentary", `ALTER TABLE image_sources ADD COLUMN commentary TEXT NOT NULL DEFAULT ''`)
+	b.ensureColumn("image_sources", "commentary_translated", `ALTER TABLE image_sources ADD COLUMN commentary_translated TEXT NOT NULL DEFAULT ''`)
 	b.ensureColumn("image_sources", "original", `ALTER TABLE image_sources ADD COLUMN original TEXT NOT NULL DEFAULT ''`)
 	b.ensureColumn("image_sources", "similarity", `ALTER TABLE image_sources ADD COLUMN similarity REAL NOT NULL DEFAULT 0`)
 	b.ensureColumn("image_sources", "parent_url", `ALTER TABLE image_sources ADD COLUMN parent_url TEXT NOT NULL DEFAULT ''`)
@@ -213,6 +215,7 @@ func Bootstrap(db *DB) error {
 		`UPDATE potential_relation_pairs SET collection_hidden = 1 WHERE `+pairHiddenProbe("a_image_id", "b_image_id"),
 		"backfill potential_relation_pairs.collection_hidden")
 	b.ensureColumn("relation_session", "detector", `ALTER TABLE relation_session ADD COLUMN detector TEXT NOT NULL DEFAULT 'both'`)
+	b.widenDerivativeEdgesKey()
 	// A group below two members is not a group. Bulk deletes that predate
 	// the relations hook cascaded the member rows away without dissolving
 	// the group row, and an import replays whatever the export carried.
@@ -715,6 +718,21 @@ func (b *bootstrapper) exec(label, sql string) {
 	}
 }
 
+// execTx is exec for a migration whose statements only make sense together.
+// A table rebuild that dies between its DROP and its RENAME leaves the rows
+// in a table the next boot's schema.sql then hides behind a fresh empty one.
+func (b *bootstrapper) execTx(label, stmts string) {
+	if b.err != nil {
+		return
+	}
+	if err := InWriteTx(b.db.Write, func(tx *sql.Tx) error {
+		_, err := tx.Exec(stmts)
+		return err
+	}); err != nil {
+		b.err = fmt.Errorf("%s: %w", label, err)
+	}
+}
+
 // ratingRankExpr is the highest-wins rating rank of one image, read off
 // its rating-category tags. imageIDCol names the row under test: the
 // backfill correlates to images.id, the triggers to NEW / OLD.
@@ -773,6 +791,37 @@ func (b *bootstrapper) ensureColumn(table, column, alterSQL string) {
 	if _, err := b.db.Write.Exec(alterSQL); err != nil {
 		b.err = fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
+}
+
+// widenDerivativeEdgesKey rebuilds derivative_edges when it still keys on
+// derivative_image_id alone. SQLite cannot widen a primary key in place,
+// and the DROP takes the source-side index with it.
+func (b *bootstrapper) widenDerivativeEdgesKey() {
+	if b.err != nil {
+		return
+	}
+	var keyed int
+	if err := b.db.Write.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('derivative_edges') WHERE name = 'source_image_id' AND pk > 0`,
+	).Scan(&keyed); err != nil {
+		b.err = fmt.Errorf("inspect derivative_edges key: %w", err)
+		return
+	}
+	if keyed > 0 {
+		return
+	}
+	b.execTx("widen derivative_edges key", `
+		CREATE TABLE derivative_edges_wide (
+		    derivative_image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+		    source_image_id     INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+		    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+		    PRIMARY KEY (derivative_image_id, source_image_id)
+		);
+		INSERT INTO derivative_edges_wide (derivative_image_id, source_image_id, created_at)
+		    SELECT derivative_image_id, source_image_id, created_at FROM derivative_edges;
+		DROP TABLE derivative_edges;
+		ALTER TABLE derivative_edges_wide RENAME TO derivative_edges;
+		CREATE INDEX IF NOT EXISTS idx_derivative_edges_source ON derivative_edges(source_image_id);`)
 }
 
 // backfillIfFresh runs the one-time seed the two probes above share: only

@@ -8,6 +8,7 @@
 package relations
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -38,9 +39,9 @@ var (
 	// chains, not trees.
 	ErrVersionExists = errors.New("relations: version edge already exists on one side")
 
-	// ErrDerivativeExists is returned when adding a derivative edge
-	// would assign a derivative a second source.
-	ErrDerivativeExists = errors.New("relations: derivative already has a source")
+	// ErrDerivativeCycle is returned when adding a derivative edge would
+	// make the two images descend from each other.
+	ErrDerivativeCycle = errors.New("relations: source already descends from the derivative")
 
 	// ErrChainTooDeep is returned when adding a version or derivative
 	// edge would make the chain / tree deeper than MaxVersionChainDepth,
@@ -74,8 +75,8 @@ func FriendlyErrorFor(err error) *FriendlyError {
 		return &FriendlyError{Status: 409, Code: "conflict", Message: "These images are already related through another image."}
 	case errors.Is(err, ErrVersionExists):
 		return &FriendlyError{Status: 409, Code: "conflict", Message: "One of the images already has a version edge; remove it first."}
-	case errors.Is(err, ErrDerivativeExists):
-		return &FriendlyError{Status: 409, Code: "conflict", Message: "The chosen derivative already has a source; remove it first."}
+	case errors.Is(err, ErrDerivativeCycle):
+		return &FriendlyError{Status: 409, Code: "conflict", Message: "The chosen source is already based on this image."}
 	case errors.Is(err, ErrChainTooDeep):
 		return &FriendlyError{Status: 409, Code: "conflict", Message: "The chain is already at its maximum depth."}
 	case errors.Is(err, ErrNotInGroup):
@@ -90,13 +91,9 @@ type Service struct {
 }
 
 // New returns a Service backed by the provided database.
-func New(database *db.DB) *Service {
-	return &Service{db: database}
-}
+func New(database *db.DB) *Service { return &Service{db: database} }
 
-func nowISO() string {
-	return time.Now().UTC().Format(time.RFC3339)
-}
+func nowISO() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // canonicalPair returns (min, max) so symmetric relations
 // (not_related, in particular) live as a single canonical row
@@ -108,9 +105,7 @@ func canonicalPair(a, b int64) (int64, int64) {
 	return b, a
 }
 
-func (s *Service) inWriteTx(work func(*sql.Tx) error) error {
-	return db.InWriteTx(s.db.Write, work)
-}
+func (s *Service) inWriteTx(work func(*sql.Tx) error) error { return db.InWriteTx(s.db.Write, work) }
 
 // addGroupRelation enrols a and b in a group of the given kind in a
 // single transaction. The other kind's group state is left untouched:
@@ -149,11 +144,12 @@ func (s *Service) AddAlternate(a, b int64) error {
 // the whole component. Mirrors the implications walker's depth budget.
 const MaxVersionChainDepth = 16
 
-// ChainPath walks table upward from start, reading selectCol via whereCol,
-// and returns the nodes above it nearest-first (empty when start has none).
-// Both edge tables make the read side a primary key, so every step is a
-// point seek onto at most one row. Depth-capped so a malformed cycle in the
-// data can't spin; q is a transaction or the read pool.
+// ChainPath walks the single-parent chain in table upward from start,
+// reading selectCol via whereCol, and returns the nodes above it
+// nearest-first (empty when start has none). version_edges makes the
+// read side a primary key, so every step is a point seek onto at most
+// one row. Depth-capped so a malformed cycle in the data can't spin; q
+// is a transaction or the read pool.
 func ChainPath(q db.Querier, table, selectCol, whereCol string, start int64) ([]int64, error) {
 	var path []int64
 	cur := start
@@ -186,14 +182,14 @@ func chainRoot(q db.Querier, table, parentCol, childCol string, start int64) (in
 
 // chainReachesTx reports whether target sits anywhere above start.
 func chainReachesTx(tx *sql.Tx, table, parentCol, childCol string, start, target int64) (bool, error) {
-	path, err := ChainPath(tx, table, parentCol, childCol, start)
+	above, _, err := chainSpan(tx, table, parentCol, childCol, start)
 	if err != nil {
 		return false, err
 	}
-	return slices.Contains(path, target), nil
+	return slices.Contains(above[1:], target), nil
 }
 
-// chainRelatesTx reports whether a and b sit on one root-to-leaf path of
+// chainRelatesTx reports whether one of a and b sits above the other in
 // the table's edges, any number of steps apart. The pair carries no
 // orientation, so both directions are walked.
 func chainRelatesTx(tx *sql.Tx, table, parentCol, childCol string, a, b int64) (bool, error) {
@@ -203,42 +199,41 @@ func chainRelatesTx(tx *sql.Tx, table, parentCol, childCol string, a, b int64) (
 	return chainReachesTx(tx, table, parentCol, childCol, b, a)
 }
 
-// chainDepthTx counts the edges in table on one side of start: selecting
+// chainDepthTx counts the levels in table on one side of start: selecting
 // parentCol via childCol counts ancestors, the reverse counts
 // descendants. Capped at MaxVersionChainDepth like the other walks; the
 // callers only need to know whether the joined chain would exceed it.
 func chainDepthTx(tx *sql.Tx, table, selectCol, whereCol string, start int64) (int, error) {
-	path, err := ChainPath(tx, table, selectCol, whereCol, start)
-	if err != nil {
-		return 0, err
-	}
-	return len(path), nil
-}
-
-// derivativeHeightTx returns the number of edge levels beneath start in
-// the derivative tree, capped at MaxVersionChainDepth like the chain
-// walks.
-func derivativeHeightTx(tx *sql.Tx, start int64) (int, error) {
-	_, levels, err := chainSpanTx(tx, "derivative_edges", "derivative_image_id", "source_image_id", start)
+	_, levels, err := chainSpan(tx, table, selectCol, whereCol, start)
 	return levels, err
 }
 
-// chainSpanTx collects start plus everything reachable from it through
-// selectCol/whereCol: the single-parent chain when the columns read
-// upward, the whole subtree when they read downward. Level-capped like
-// the other walks.
-func chainSpanTx(tx *sql.Tx, table, selectCol, whereCol string, start int64) ([]int64, int, error) {
+// chainSpan collects start plus everything reachable from it through
+// selectCol/whereCol: the ancestors when the columns read upward, the
+// descendants when they read downward. Level-capped like the other
+// walks, and deduplicated - a derivative names several sources, so
+// without the visited set two paths onto one image would enqueue it
+// once per path and the frontier would double at every shared level.
+func chainSpan(q db.Querier, table, selectCol, whereCol string, start int64) ([]int64, int, error) {
 	span := []int64{start}
+	seen := map[int64]bool{start: true}
 	frontier := []int64{start}
 	levels := 0
 	for level := 0; level < MaxVersionChainDepth && len(frontier) > 0; level++ {
 		var next []int64
 		for _, id := range frontier {
-			ids, err := db.QueryIDs(tx, `SELECT `+selectCol+` FROM `+table+` WHERE `+whereCol+` = ?`, id)
+			ids, err := db.QueryIDs(q,
+				`SELECT `+selectCol+` FROM `+table+` WHERE `+whereCol+` = ? ORDER BY `+selectCol, id)
 			if err != nil {
 				return nil, 0, err
 			}
-			next = append(next, ids...)
+			for _, id := range ids {
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
+				next = append(next, id)
+			}
 		}
 		if len(next) == 0 {
 			break
@@ -250,26 +245,64 @@ func chainSpanTx(tx *sql.Tx, table, selectCol, whereCol string, start int64) ([]
 	return span, levels, nil
 }
 
+// derivativeComponent collects every image joined to start by derivative
+// edges in either direction. A derivative can name several sources, so
+// the graph has no single root to walk up to; the visited set is what
+// bounds the walk.
+func derivativeComponent(q db.Querier, start int64) ([]int64, error) {
+	members := []int64{start}
+	seen := map[int64]bool{start: true}
+	for i := 0; i < len(members); i++ {
+		for _, side := range [2][2]string{
+			{"source_image_id", "derivative_image_id"},
+			{"derivative_image_id", "source_image_id"},
+		} {
+			ids, err := db.QueryIDs(q,
+				`SELECT `+side[0]+` FROM derivative_edges WHERE `+side[1]+` = ? ORDER BY `+side[0], members[i])
+			if err != nil {
+				return nil, err
+			}
+			for _, id := range ids {
+				if !seen[id] {
+					seen[id] = true
+					members = append(members, id)
+				}
+			}
+		}
+	}
+	return members, nil
+}
+
+// DerivativeComponent returns every image joined to imageID by derivative
+// edges in either direction, the walk order it was reached in. Nil when the
+// image sits on no edge, which is what tells a renderer there is nothing to
+// draw.
+func DerivativeComponent(q db.Querier, imageID int64) ([]int64, error) {
+	members, err := derivativeComponent(q, imageID)
+	if err != nil || len(members) < 2 {
+		return nil, err
+	}
+	return members, nil
+}
+
 // walkToRootTx follows the single-parent chain in table upward from start
 // and returns the root - start itself when it has no parent.
 func walkToRootTx(tx *sql.Tx, table, parentCol, childCol string, start int64) (int64, error) {
 	return chainRoot(tx, table, parentCol, childCol, start)
 }
 
-// edgeSpec is what an add-edge differs in: the table and its two columns,
-// the sentinel a refusal answers with, the predicate that says the
-// endpoints are already spoken for, and the measure of what hangs below
-// the child. The shared body is addEdgeTx, next to the dissolveEdges the
-// two Dissolve methods already share.
+// edgeSpec is what an add-edge differs in: the table and its two
+// columns, the sentinel a refusal answers with, and the predicate that
+// says the endpoints are already spoken for. The shared body is
+// addEdge, next to the dissolveEdges the two Dissolve methods already
+// share.
 type edgeSpec struct {
 	table, parentCol, childCol string
 	exists                     error
 	// occupied reports whether either endpoint already carries an edge
-	// this one would conflict with: a version chain refuses a second
-	// child, a derivative tree does not.
+	// this one would conflict with. Nil for a kind with no per-side
+	// uniqueness to violate.
 	occupied func(tx *sql.Tx, parent, child int64) (bool, error)
-	// down measures the chain or subtree already hanging under child.
-	down func(tx *sql.Tx, child int64) (int, error)
 }
 
 var versionEdge = edgeSpec{
@@ -283,22 +316,11 @@ var versionEdge = edgeSpec{
 		).Scan(&n)
 		return n > 0, err
 	},
-	down: func(tx *sql.Tx, child int64) (int, error) {
-		return chainDepthTx(tx, "version_edges", "child_image_id", "parent_image_id", child)
-	},
 }
 
 var derivativeEdge = edgeSpec{
 	table: "derivative_edges", parentCol: "source_image_id", childCol: "derivative_image_id",
-	exists: ErrDerivativeExists,
-	occupied: func(tx *sql.Tx, _, child int64) (bool, error) {
-		var n int
-		err := tx.QueryRow(
-			`SELECT COUNT(*) FROM derivative_edges WHERE derivative_image_id = ?`, child,
-		).Scan(&n)
-		return n > 0, err
-	},
-	down: derivativeHeightTx,
+	exists: ErrDerivativeCycle,
 }
 
 // AddVersionEdge declares child as the newer version of parent. The
@@ -311,10 +333,11 @@ func (s *Service) AddVersionEdge(parent, child int64) error {
 	return s.addEdge(versionEdge, "version", parent, child)
 }
 
-// AddDerivativeEdge declares derivative was made from source. A source
-// can carry many derivatives (tree); each derivative has exactly one
-// source. Refuses when the derivative already has a source or when
-// adding the edge would close a cycle with an existing source chain.
+// AddDerivativeEdge declares derivative was made from source. Both
+// sides fan out: a composite names one edge per image it was made
+// from, and a source carries one per image made from it. Refuses only
+// when the edge would close a cycle or push the graph past the depth
+// cap.
 func (s *Service) AddDerivativeEdge(source, derivative int64) error {
 	return s.addEdge(derivativeEdge, "derivative", source, derivative)
 }
@@ -346,11 +369,13 @@ func (s *Service) addEdge(spec edgeSpec, kind string, parent, child int64) error
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		switch occupied, err := spec.occupied(tx, parent, child); {
-		case err != nil:
-			return err
-		case occupied:
-			return spec.exists
+		if spec.occupied != nil {
+			switch occupied, err := spec.occupied(tx, parent, child); {
+			case err != nil:
+				return err
+			case occupied:
+				return spec.exists
+			}
 		}
 		// Walk parent's own chain upwards; if child is anywhere up there,
 		// the new edge would close a cycle.
@@ -365,7 +390,7 @@ func (s *Service) addEdge(spec edgeSpec, kind string, parent, child int64) error
 		if err != nil {
 			return err
 		}
-		down, err := spec.down(tx, child)
+		down, err := chainDepthTx(tx, spec.table, spec.childCol, spec.parentCol, child)
 		if err != nil {
 			return err
 		}
@@ -729,11 +754,10 @@ func (s *Service) DissolveVersionChain(anyMember int64) error {
 	return s.dissolveEdges(anyMember, collectVersionChainMembersTx, "version_edges", "parent_image_id", "child_image_id")
 }
 
-// DissolveDerivativeTree drops every derivative_edge in the tree that
-// contains anyMember. Walks up via derivative_image_id to the root,
-// then DFSes down via source_image_id collecting every member, then
-// DELETEs in one statement using `source_image_id IN (...) OR
-// derivative_image_id IN (...)`. Idempotent on an image with no edges.
+// DissolveDerivativeTree drops every derivative_edge joined to
+// anyMember. Collects the component around it, then DELETEs in one
+// statement using `source_image_id IN (...) OR derivative_image_id IN
+// (...)`. Idempotent on an image with no edges.
 func (s *Service) DissolveDerivativeTree(anyMember int64) error {
 	return s.dissolveEdges(anyMember, collectDerivativeTreeMembersTx, "derivative_edges", "source_image_id", "derivative_image_id")
 }
@@ -787,32 +811,16 @@ func collectVersionChainMembersTx(tx *sql.Tx, anyMember int64) ([]int64, error) 
 	return append([]int64{root}, below...), nil
 }
 
-// collectDerivativeTreeMembersTx walks the derivative tree containing
-// anyMember and returns every member id, or nil when anyMember sits on
-// no derivative edge. Up-walk is depth-capped; the DFS down collects
-// every descendant in arbitrary order.
+// collectDerivativeTreeMembersTx returns every image joined to
+// anyMember by derivative edges, or nil when it sits on none. Several
+// sources per derivative means several roots, so the walk crosses both
+// columns rather than climbing to one.
 func collectDerivativeTreeMembersTx(tx *sql.Tx, anyMember int64) ([]int64, error) {
-	var has int
-	if err := tx.QueryRow(
-		`SELECT EXISTS (SELECT 1 FROM derivative_edges WHERE source_image_id = ? OR derivative_image_id = ?)`,
-		anyMember, anyMember,
-	).Scan(&has); err != nil {
+	members, err := derivativeComponent(tx, anyMember)
+	if err != nil || len(members) < 2 {
 		return nil, err
 	}
-	if has == 0 {
-		return nil, nil
-	}
-	root, err := walkToRootTx(tx, "derivative_edges", "source_image_id", "derivative_image_id", anyMember)
-	if err != nil {
-		return nil, err
-	}
-	// BFS by tree level so MaxVersionChainDepth bounds genuine depth.
-	// A previous DFS implementation incremented depth per stack pop, so
-	// a wide tree (single source with >256 derivatives) silently
-	// truncated at the 256th child; the cap should describe the tree's
-	// vertical reach, not its fan-out.
-	members, _, err := chainSpanTx(tx, "derivative_edges", "derivative_image_id", "source_image_id", root)
-	return members, err
+	return members, nil
 }
 
 // deleteEdgesByEndpointsTx removes every row in `table` whose `colA` or
@@ -831,10 +839,10 @@ func deleteEdgesByEndpointsTx(tx *sql.Tx, table, colA, colB string, ids []int64)
 }
 
 // ReverseDerivativeEdge swaps the source and derivative sides of the
-// named edge in one transaction. Idempotent on a missing edge. If the
-// would-be new derivative side already has another source, the
-// function returns ErrDerivativeExists so writeRelationError surfaces
-// the operator-facing message.
+// named edge in one transaction. Idempotent on a missing edge. When
+// another path still leads from the derivative down to the source, the
+// swapped row would close a loop and the function returns
+// ErrDerivativeCycle.
 func (s *Service) ReverseDerivativeEdge(source, derivative int64) error {
 	if source == derivative {
 		return ErrSelfRelation
@@ -849,17 +857,12 @@ func (s *Service) ReverseDerivativeEdge(source, derivative int64) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return nil
 		}
-		// The swapped row makes `source` the new derivative. PK on
-		// derivative_image_id makes that collide with any existing edge
-		// where source is already a derivative of another image.
-		var blocked int
-		if err := tx.QueryRow(
-			`SELECT EXISTS (SELECT 1 FROM derivative_edges WHERE derivative_image_id = ?)`, source,
-		).Scan(&blocked); err != nil {
+		loops, err := chainReachesTx(tx, "derivative_edges", "source_image_id", "derivative_image_id", derivative, source)
+		if err != nil {
 			return err
 		}
-		if blocked != 0 {
-			return ErrDerivativeExists
+		if loops {
+			return ErrDerivativeCycle
 		}
 		_, err = tx.Exec(
 			`INSERT INTO derivative_edges (derivative_image_id, source_image_id, created_at) VALUES (?, ?, ?)`,
@@ -870,11 +873,44 @@ func (s *Service) ReverseDerivativeEdge(source, derivative int64) error {
 }
 
 // RemoveNotRelated forgets a previously-rejected pair so it becomes
-// eligible to resurface in find-pairs again. Idempotent.
+// eligible to resurface in find-pairs again. Idempotent. Both
+// orientations go: the writers here canonicalise, but a restored
+// document can carry the row either way round and a survivor would keep
+// the pair out of the queue with nothing to show for it.
 func (s *Service) RemoveNotRelated(a, b int64) error {
-	lo, hi := canonicalPair(a, b)
-	_, err := s.db.Write.Exec(`DELETE FROM not_related_pairs WHERE a_image_id = ? AND b_image_id = ?`, lo, hi)
+	_, err := s.db.Write.Exec(
+		`DELETE FROM not_related_pairs
+		  WHERE (a_image_id = ? AND b_image_id = ?) OR (a_image_id = ? AND b_image_id = ?)`,
+		a, b, b, a,
+	)
 	return err
+}
+
+// QueueForReview puts a pair back on the find-pairs queue at distance 0,
+// keeping any existing row at its real distance. The source is the
+// operator asking to see it again, not a detector: claiming a phash match
+// that never happened would misread on the session card.
+func (s *Service) QueueForReview(a, b int64) error {
+	lo, hi := canonicalPair(a, b)
+	_, err := s.db.Write.Exec(
+		`INSERT OR IGNORE INTO potential_relation_pairs (a_image_id, b_image_id, distance, created_at, source)
+		 VALUES (?, ?, 0, ?, ?)`,
+		lo, hi, nowISO(), SourceReview,
+	)
+	return err
+}
+
+// ResetSkipped clears skipped_at on every queued pair so previously
+// skipped ones surface again at the front of the queue, and reports how
+// many it freed.
+func (s *Service) ResetSkipped(ctx context.Context) (int64, error) {
+	res, err := s.db.Write.ExecContext(ctx,
+		`UPDATE potential_relation_pairs SET skipped_at = NULL WHERE skipped_at IS NOT NULL`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ClearVersionEdgeConflictsFor drops only the version_edge rows that
@@ -889,19 +925,6 @@ func (s *Service) ClearVersionEdgeConflictsFor(parent, child int64) error {
 	_, err := s.db.Write.Exec(
 		`DELETE FROM version_edges WHERE child_image_id = ? OR parent_image_id = ?`,
 		child, parent,
-	)
-	return err
-}
-
-// ClearDerivativeSourceOf drops the derivative_edge that names
-// `derivative` as its derivative side. The schema allows only one
-// source per derivative, so this is the single row that blocks a
-// re-source. Used by the detail-page "Replace existing source"
-// affordance.
-func (s *Service) ClearDerivativeSourceOf(derivative int64) error {
-	_, err := s.db.Write.Exec(
-		`DELETE FROM derivative_edges WHERE derivative_image_id = ?`,
-		derivative,
 	)
 	return err
 }
@@ -1109,49 +1132,45 @@ func lookupGroupIDTx(tx *sql.Tx, table string, imageID int64) (sql.NullInt64, er
 // to short-circuit before mutating - the spec demands at most one
 // type per pair.
 func pairHasOtherRelationTx(tx *sql.Tx, a, b int64, ignore string) (bool, error) {
-	if ignore != "duplicate" {
-		ok, err := pairShareGroupTx(tx, "dup_group_members", a, b)
-		if err != nil {
-			return false, err
+	for _, p := range pairProbes {
+		if p.kind == ignore {
+			continue
 		}
-		if ok {
-			return true, nil
-		}
-	}
-	if ignore != "alternate" {
-		ok, err := pairShareGroupTx(tx, "alt_group_members", a, b)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			return true, nil
-		}
-	}
-	if ignore != "version" {
-		ok, err := pairEdgeExistsTx(tx, "version_edges", "child_image_id", "parent_image_id", a, b)
+		ok, err := p.probe(tx, a, b)
 		if err != nil || ok {
 			return ok, err
-		}
-	}
-	if ignore != "derivative" {
-		ok, err := pairEdgeExistsTx(tx, "derivative_edges", "derivative_image_id", "source_image_id", a, b)
-		if err != nil || ok {
-			return ok, err
-		}
-	}
-	if ignore != "not_related" {
-		lo, hi := canonicalPair(a, b)
-		var n int
-		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM not_related_pairs WHERE a_image_id = ? AND b_image_id = ?`, lo, hi,
-		).Scan(&n); err != nil {
-			return false, err
-		}
-		if n > 0 {
-			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// pairProbes is one existence test per relation kind, in the order
+// pairHasOtherRelationTx runs them. The order is not load-bearing - the
+// answer is a disjunction - but the cheap group joins come first.
+var pairProbes = []struct {
+	kind  string
+	probe func(*sql.Tx, int64, int64) (bool, error)
+}{
+	{"duplicate", func(tx *sql.Tx, a, b int64) (bool, error) {
+		return pairShareGroupTx(tx, "dup_group_members", a, b)
+	}},
+	{"alternate", func(tx *sql.Tx, a, b int64) (bool, error) {
+		return pairShareGroupTx(tx, "alt_group_members", a, b)
+	}},
+	{"version", func(tx *sql.Tx, a, b int64) (bool, error) {
+		return pairEdgeExistsTx(tx, "version_edges", "child_image_id", "parent_image_id", a, b)
+	}},
+	{"derivative", func(tx *sql.Tx, a, b int64) (bool, error) {
+		return pairEdgeExistsTx(tx, "derivative_edges", "derivative_image_id", "source_image_id", a, b)
+	}},
+	{"not_related", func(tx *sql.Tx, a, b int64) (bool, error) {
+		lo, hi := canonicalPair(a, b)
+		var n int
+		err := tx.QueryRow(
+			`SELECT COUNT(*) FROM not_related_pairs WHERE a_image_id = ? AND b_image_id = ?`, lo, hi,
+		).Scan(&n)
+		return n > 0, err
+	}},
 }
 
 // pairEdgeExistsTx reports whether an edge table holds the pair, in either
@@ -1242,11 +1261,11 @@ func pruneQueueForGroupTx(tx *sql.Tx, table string, anchor int64) error {
 // queued, and the session went on asking about images the tree already
 // related.
 func pruneQueueForChainTx(tx *sql.Tx, table, parentCol, childCol string, parent, child int64) error {
-	above, _, err := chainSpanTx(tx, table, parentCol, childCol, parent)
+	above, _, err := chainSpan(tx, table, parentCol, childCol, parent)
 	if err != nil {
 		return err
 	}
-	below, _, err := chainSpanTx(tx, table, childCol, parentCol, child)
+	below, _, err := chainSpan(tx, table, childCol, parentCol, child)
 	if err != nil {
 		return err
 	}

@@ -63,9 +63,7 @@ func validateMaxLen(field, s string, max int) error {
 // validateImageSource / validateImageURL / validateImageCollection carry
 // the caps into the create (POST /images) and edit (PATCH /images/{id})
 // paths. Callers pass the already-trimmed value.
-func validateImageSource(s string) error {
-	return validateMaxLen("source", s, maxImageSourceLen)
-}
+func validateImageSource(s string) error { return validateMaxLen("source", s, maxImageSourceLen) }
 
 func validateImageURL(s string) error {
 	if s == "" {
@@ -89,7 +87,7 @@ func validateImageCollection(s string) error {
 // meaningful next to a non-empty collection label (the detail page
 // renders "(none) #5" otherwise and collection: search never surfaces
 // the row), so it is refused without one. Values arrive trimmed.
-func validateCreateProvenance(source, postID, url, md5, parentURL, collection, commentary, original, postExt string, order *int) error {
+func validateCreateProvenance(source, postID, url, md5, parentURL, collection, commentary, translated, original, postExt string, order *int) error {
 	if err := validateImageSource(source); err != nil {
 		return err
 	}
@@ -109,6 +107,9 @@ func validateCreateProvenance(source, postID, url, md5, parentURL, collection, c
 		return err
 	}
 	if err := validateMaxLen("commentary", commentary, maxImageCommentaryLen); err != nil {
+		return err
+	}
+	if err := validateMaxLen("commentary_translated", translated, maxImageCommentaryLen); err != nil {
 		return err
 	}
 	if err := validateMaxLen("original", original, maxImageOriginalLen); err != nil {
@@ -192,12 +193,13 @@ type collectionJSON struct {
 // url fields above mirror the primary origin for backwards compatibility;
 // this array carries them all.
 type sourceJSON struct {
-	Site       string  `json:"site"`
-	PostID     string  `json:"post_id,omitempty"`
-	URL        string  `json:"url"`
-	Commentary string  `json:"commentary,omitempty"`
-	Original   string  `json:"original,omitempty"`
-	Similarity float64 `json:"similarity,omitempty"`
+	Site                 string  `json:"site"`
+	PostID               string  `json:"post_id,omitempty"`
+	URL                  string  `json:"url"`
+	Commentary           string  `json:"commentary,omitempty"`
+	CommentaryTranslated string  `json:"commentary_translated,omitempty"`
+	Original             string  `json:"original,omitempty"`
+	Similarity           float64 `json:"similarity,omitempty"`
 }
 
 // annotationJSON is one positional note box. On input (create/enrich) only the
@@ -215,6 +217,31 @@ type annotationJSON struct {
 	// carries markup, for a reader that would rather not parse it.
 	BodyHTML string `json:"body_html,omitempty"`
 	BodyText string `json:"body_text,omitempty"`
+}
+
+// maxImageCommentaryDTextLen bounds a commentary field's source markup. The
+// converted body is capped on the way out, but converting grows a body rather
+// than shrinking it, so nothing whose conversion would have been kept reaches
+// a multiple of that cap - and without a ceiling the only bound on the
+// conversion is the multipart body limit.
+const maxImageCommentaryDTextLen = 4 * maxImageCommentaryLen
+
+// commentaryFromInput folds one commentary field: a source's own DText is
+// converted into the vocabulary the renderer reads, and the plain text is the
+// fallback a monloader too old to send it carries. The notes' body_html works
+// the same way, and for the same reason - a booru's own markup is the only
+// form that still says what the artist wrote.
+func commentaryFromInput(plain, dtext string) string {
+	if strings.TrimSpace(dtext) == "" {
+		return strings.TrimSpace(plain)
+	}
+	body := markup.FromDText(dtext)
+	// Converting can grow a body - a bracketed link becomes a longer
+	// construct - so the cap is applied to what is stored, not to what came in.
+	if r := []rune(body); len(r) > maxImageCommentaryLen {
+		body = string(r[:maxImageCommentaryLen])
+	}
+	return body
 }
 
 // annotationsFromInput clamps coordinates non-negative and bounds the count and

@@ -1,6 +1,3 @@
-{{/* The look-up dialog's candidate spellings. Rendered into the body on open
-     (Seed: with its note and cancel) and into the input's dropdown while
-     typing (rows only). Picking a row fills the input and runs the preview. */}}
 {{define "partials/tag_ptr_lookup_search.html"}}
 {{if and .Seed .Note}}<p class="field-hint ptr-lookup-note">{{.Note}}</p>{{end}}
 {{if .Rows}}

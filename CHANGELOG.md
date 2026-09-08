@@ -1,5 +1,60 @@
 # Changelog
 
+## [v1.21.0] - 2026-09-08
+### Added
+- Select mode, drag-to-select and invert selection. ([#107](https://github.com/monbooru/monbooru/issues/107))
+- Choose how many images a page holds, and a small/medium/large thumbnail ramp. ([#107](https://github.com/monbooru/monbooru/issues/107))
+- A pager above the grid as well as below it. ([#107](https://github.com/monbooru/monbooru/issues/107))
+- Selection can span pages, added [Select all] over a whole search or inbox batch. ([#101](https://github.com/monbooru/monbooru/issues/101))
+- Unify rename / move dialog. ([#122](https://github.com/monbooru/monbooru/issues/122))
+- The destination preview whole paths, and a rename checks its scope for taken names. ([#123](https://github.com/monbooru/monbooru/issues/123))
+- Settings -> Maintenance lists the gallery's empty folders and removes the ones left checked. ([#124](https://github.com/monbooru/monbooru/issues/124))
+- New keyboard shortcuts for the gallery's view and batch controls, the tags listing, Relations and plugin buttons.
+- The shortcuts overlay lists the surface depending on the context instead of all of them.
+- An image can be based on more than one source. ([#90](https://github.com/monbooru/monbooru/issues/90))
+- A derivative component is drawn as a layered graph, with actions on every edge.
+- `tagged:` and `autotagged:` filter by the source that applied the tag. ([#87](https://github.com/monbooru/monbooru/issues/87))
+- A source keeps its original commentary beside the translation. ([#89](https://github.com/monbooru/monbooru/issues/89))
+- `server.cors_origins` can be set so a browser client on another origin can call the API. ([#126](https://github.com/monbooru/monbooru/issues/126))
+- Portable archives, an AppImage, an AUR package, and SHA256SUMS beside the downloads. ([#114](https://github.com/monbooru/monbooru/issues/114))
+- A theme can ship its own tab icon. ([monbooru-plugins#5](https://github.com/monbooru/monbooru-plugins/issues/5))
+- PNG generation metadata is read from the zTXt chunk too.
+
+### Changed
+- BREAKING: `GET /api/v1/images/{id}/relations` answers `derivative_sources`, an array, not `derivative_source`.
+- One download per platform instead of a desktop and a server build; `-desktop=false` restores server behaviour. 
+- The CUDA and OpenVINO images dependencies updates.
+
+### Removed
+- `server.logo` and `server.custom_css`; a theme folder carries `theme.css`, `logo.png` and `favicon.png` instead.
+
+### Fixed
+- Auto-tagging no longer reads a large image as pixel art. ([#128](https://github.com/monbooru/monbooru/issues/128))
+- The API's CORS check no longer takes the request's own Host as proof of origin.
+- `source:none`, `upgrade:none` and `lookup:never` searches resolve faster.
+- A ComfyUI workflow parses to the same recipe more consistently.
+- A compressed PNG iTXt chunk is decompressed instead of stored as noise.
+- Reordering a collection under a rating ceiling keeps the members it cannot show.
+- The tag sidebar's controls work on a collection's page grid.
+- The rating category is no longer offered where a tag cannot be created or moved.
+- An upload names the files it refused instead of reporting a clean run.
+- Pruning orphaned thumbnails asks first, and the file-deleting confirms open on Cancel.
+- Generate collection reports the pages it added, not the pages it walked.
+- Saving the schedule repaints its status, and a Run now no longer cancels the day's scheduled pass.
+- An unknown tag, relations id or plugin mount gets a themed 404.
+- The image viewer's zoom readout is measured against the image.
+- The health probe answers while a password is set.
+- The Remove tags dialog counts the batch, not the library.
+
+Thanks to @CeareDelafont for the suggestions (https://github.com/monbooru/monbooru/issues/107, https://github.com/monbooru/monbooru/issues/122, https://github.com/monbooru/monbooru/issues/123, https://github.com/monbooru/monbooru/issues/124).
+Thanks to @gary-host-laptop for the suggestions (https://github.com/monbooru/monbooru/issues/89, https://github.com/monbooru/monbooru/issues/90, https://github.com/monbooru/monbooru/issues/101), (https://github.com/monbooru/monbooru-plugins/issues/5).
+Thanks to @QiE2035 for the tag-source search (https://github.com/monbooru/monbooru/issues/87).
+Thanks to @seli-32 for the suggestion (https://github.com/monbooru/monbooru/issues/126).
+Thanks to @JustRoxy for the report (https://github.com/monbooru/monbooru/issues/128).
+Thanks to @PROP65 for the initial PKGBUILD (https://github.com/monbooru/monbooru/issues/114).
+
+Co-authored-by: QiE2035 <18079122+QiE2035@users.noreply.github.com>
+
 ## [v1.20.1] - 2026-08-29
 ### Fixed
 - Fix the tarball build CI.

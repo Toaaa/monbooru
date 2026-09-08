@@ -5,10 +5,11 @@ import (
 	"cmp"
 	"database/sql"
 	"encoding/json"
+	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/monbooru/monbooru/internal/config"
 	"github.com/monbooru/monbooru/internal/gallery"
@@ -32,11 +33,6 @@ type Gallery struct {
 	// fetch that failed before it could enrich). May be nil (the test harness
 	// wires no web layer).
 	RecordFetch func(imageID int64, state, message string)
-	// VisibleCount / TagCount return the cached non-missing-image and
-	// non-alias-tag counts (the same values the Settings page shows). May
-	// be nil; listGalleries falls back to a direct query then.
-	VisibleCount func() (int, error)
-	TagCount     func() (int, error)
 }
 
 // invalidate runs the gallery's cache-invalidation hook when one is
@@ -70,8 +66,10 @@ type ResolverFunc func(name string) (Gallery, bool)
 
 // Handler is the root handler for all /api/v1/ routes.
 type Handler struct {
-	cfg      *config.Config
-	cfgMu    *sync.RWMutex // guards cfg.Auth.Tokens, mutated at runtime by the web layer
+	// cfg answers with a snapshot rather than the live config: the settings
+	// page rewrites these values at runtime under a lock this package does
+	// not hold, and an autotag run reads its copy well past the request.
+	cfg      func() *config.Config
 	jobs     *jobs.Manager
 	resolver ResolverFunc
 	version  string
@@ -79,18 +77,14 @@ type Handler struct {
 
 // New creates a new API handler. version is surfaced on the /api/v1/ root so
 // clients (e.g. monloader) can read the server version without scraping HTML.
-// cfgMu is the web layer's config lock; token reads take it in shared mode.
-func New(cfg *config.Config, cfgMu *sync.RWMutex, jobManager *jobs.Manager, resolver ResolverFunc, version string) *Handler {
-	return &Handler{cfg: cfg, cfgMu: cfgMu, jobs: jobManager, resolver: resolver, version: version}
+func New(cfg func() *config.Config, jobManager *jobs.Manager, resolver ResolverFunc, version string) *Handler {
+	return &Handler{cfg: cfg, jobs: jobManager, resolver: resolver, version: version}
 }
 
 // uploadDestination reads the two settings a received file is filed by.
-// They are strings the settings page rewrites at runtime, so the read
-// takes the web layer's lock.
 func (h *Handler) uploadDestination() (folder, name string) {
-	h.cfgMu.RLock()
-	defer h.cfgMu.RUnlock()
-	return h.cfg.Gallery.DefaultUploadFolder, h.cfg.Gallery.DefaultUploadName
+	cfg := h.cfg()
+	return cfg.Gallery.DefaultUploadFolder, cfg.Gallery.DefaultUploadName
 }
 
 // resolveGallery picks the target gallery from ?gallery=... (preferred)
@@ -193,12 +187,14 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/openapi.json", h.openAPIJSON)
 	mux.HandleFunc("GET /api/v1/docs", h.openAPIDocs)
 
+	mux.HandleFunc("OPTIONS /api/v1/", h.preflight)
+
 	mux.HandleFunc("GET /api/v1/", h.auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/" {
 			apiError(w, http.StatusNotFound, "not_found", "endpoint not found: "+r.URL.Path)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		WriteJSON(w, http.StatusOK, map[string]any{
 			"api":     "monbooru",
 			"version": h.version,
 			"docs":    "/api/v1/docs",
@@ -217,28 +213,97 @@ func requireID(w http.ResponseWriter, v int64, name string) bool {
 	return true
 }
 
+// SetCORS marks the response as origin-dependent and echoes an allowed
+// Origin back. It reports whether a cross-origin caller may proceed; a
+// request carrying no Origin is not one, and always may. Exported for the
+// routes the web layer mounts itself - the pairing endpoints and /health -
+// so one policy covers every address a browser can reach.
+func SetCORS(w http.ResponseWriter, r *http.Request, cfg *config.Config) bool {
+	w.Header().Set("Vary", "Origin")
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	if !corsAllowed(cfg, r, origin) {
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	// Content-Disposition carries the filename the media endpoints answer
+	// with and is not on the CORS-safelist, so without this a browser client
+	// downloading an image gets the bytes and loses the name.
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
+	return true
+}
+
+// corsAllowed reports whether a browser at origin may read the response.
+// The address the request arrived on counts alongside base_url: they name
+// the same server, and a base_url left spelling it "localhost" would
+// otherwise refuse the page monbooru itself just served.
+func corsAllowed(cfg *config.Config, r *http.Request, origin string) bool {
+	if self := requestOrigin(cfg, r); self != "" && origin == self {
+		return true
+	}
+	// Browsers always send Origin without a trailing slash; an operator's
+	// base_url written as "http://host/" would otherwise reject every CORS
+	// request with no obvious diagnostic.
+	if origin == strings.TrimRight(cfg.Server.BaseURL, "/") {
+		return true
+	}
+	return slices.ContainsFunc(cfg.Server.CORSOrigins, func(allowed string) bool {
+		return allowed == "*" || allowed == origin
+	})
+}
+
+// requestOrigin is what a browser on the address this request arrived at
+// would send, and is empty for anything but a literal address. Host is
+// client-supplied: a rebound or proxy-forged name would otherwise vouch for
+// itself, so a deployment reached by name declares it in base_url or
+// cors_origins. Only the scheme comes from the configured base, which behind
+// a TLS-terminating proxy is the half the listener cannot know.
+func requestOrigin(cfg *config.Config, r *http.Request) string {
+	name := r.Host
+	if h, _, err := net.SplitHostPort(name); err == nil {
+		name = h
+	}
+	name = strings.Trim(name, "[]")
+	if name != "localhost" && net.ParseIP(name) == nil {
+		return ""
+	}
+	scheme := "http"
+	if strings.HasPrefix(cfg.Server.BaseURL, "https://") {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+// preflight answers the OPTIONS a browser sends before any request carrying
+// Authorization. It sits outside auth: a preflight never carries
+// credentials, so there is no token to check.
+func (h *Handler) preflight(w http.ResponseWriter, r *http.Request) {
+	cfg := h.cfg()
+	if !SetCORS(w, r, cfg) {
+		apiError(w, http.StatusForbidden, "forbidden", "CORS: origin not allowed")
+		return
+	}
+	if r.Header.Get("Origin") != "" {
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Monbooru-Gallery")
+		w.Header().Set("Access-Control-Max-Age", "600")
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // auth wraps a handler with bearer-token authentication, per-token scope
-// enforcement, and the configured-base-URL CORS check.
+// enforcement, and the CORS origin check.
 func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		// Browsers always send Origin without a trailing slash; an
-		// operator's base_url written as "http://host/" would otherwise
-		// reject every CORS request with no obvious diagnostic.
-		h.cfgMu.RLock()
-		baseURL := strings.TrimRight(h.cfg.Server.BaseURL, "/")
-		h.cfgMu.RUnlock()
-		if origin != "" && baseURL != "" {
-			if origin != baseURL {
-				apiError(w, http.StatusForbidden, "forbidden", "CORS: origin not allowed")
-				return
-			}
-			w.Header().Set("Access-Control-Allow-Origin", baseURL)
+		cfg := h.cfg()
+		if !SetCORS(w, r, cfg) {
+			apiError(w, http.StatusForbidden, "forbidden", "CORS: origin not allowed")
+			return
 		}
 
-		h.cfgMu.RLock()
-		if len(h.cfg.Auth.Tokens) == 0 {
-			h.cfgMu.RUnlock()
+		if len(cfg.Auth.Tokens) == 0 {
 			apiError(w, http.StatusServiceUnavailable, "api_disabled",
 				"API is disabled: generate an API token in Settings to enable it")
 			return
@@ -246,20 +311,16 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 		auth := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(auth, prefix) {
-			h.cfgMu.RUnlock()
 			apiError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid authorization header")
 			return
 		}
-		tok := h.cfg.FindTokenByHash(config.HashToken(auth[len(prefix):]))
+		tok := cfg.FindTokenByHash(config.HashToken(auth[len(prefix):]))
 		if tok == nil {
-			h.cfgMu.RUnlock()
 			apiError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
 			return
 		}
 		scope := scopeForMethod(r.Method)
-		hasScope := tok.HasScope(scope)
-		h.cfgMu.RUnlock()
-		if !hasScope {
+		if !tok.HasScope(scope) {
 			apiError(w, http.StatusForbidden, "insufficient_scope", "token lacks the "+scope+" scope")
 			return
 		}
@@ -318,7 +379,10 @@ func badRequest(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+// WriteJSON writes v as the body of a JSON response. Exported for the
+// routes the web layer mounts itself - the pairing endpoints - so both
+// halves of /api/v1/ answer in the same shape.
+func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
@@ -327,7 +391,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writePage emits the paginated envelope documented by paginatedSchema:
 // {page, limit, total, results}.
 func writePage(w http.ResponseWriter, page, limit, total int, results any) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	WriteJSON(w, http.StatusOK, map[string]any{
 		"page":    page,
 		"limit":   limit,
 		"total":   total,

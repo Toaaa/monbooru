@@ -35,17 +35,22 @@ func WriteSourceProvenance(database *db.DB, imageID int64, source, postID, url, 
 	return SetSourceParentURL(database, imageID, source, postID, parentURL)
 }
 
-// ApplySourceProvenance writes the per-source commentary, original, and
-// annotations an enrich or duplicate-merge push carries, skipping empty
-// values. On failure the returned step names what was being applied so
-// each caller can map the error to its own reporting.
-func ApplySourceProvenance(database *db.DB, imageID int64, source, postID, commentary, original string, notes []models.Annotation) (string, error) {
+// ApplySourceProvenance writes the per-source commentary, its translation,
+// the original, and the annotations an enrich or duplicate-merge push
+// carries, skipping empty values. On failure the returned step names what
+// was being applied so each caller can map the error to its own reporting.
+func ApplySourceProvenance(database *db.DB, imageID int64, source, postID, commentary, translated, original string, notes []models.Annotation) (string, error) {
 	if source == "" {
 		return "", nil
 	}
 	if commentary != "" {
 		if err := SetSourceCommentary(database, imageID, source, postID, commentary); err != nil {
 			return "commentary", err
+		}
+	}
+	if translated != "" {
+		if err := SetSourceCommentaryTranslated(database, imageID, source, postID, translated); err != nil {
+			return "the commentary translation", err
 		}
 	}
 	if original != "" {
@@ -65,7 +70,7 @@ func ApplySourceProvenance(database *db.DB, imageID int64, source, postID, comme
 // freshly-created image. Every field is optional; a bare create touches
 // nothing. Validation has already run, so a failure here is a DB-level
 // error.
-func ApplyCreateProvenance(database *db.DB, imageID int64, source, postID, url, md5, parentURL, collection, commentary, original string, post PostFile, order *int) error {
+func ApplyCreateProvenance(database *db.DB, imageID int64, source, postID, url, md5, parentURL, collection, commentary, translated, original string, post PostFile, order *int) error {
 	if source != "" || url != "" {
 		if err := WriteSourceProvenance(database, imageID, source, postID, url, md5, parentURL, post); err != nil {
 			return err
@@ -73,7 +78,7 @@ func ApplyCreateProvenance(database *db.DB, imageID int64, source, postID, url, 
 	}
 	// Annotations stay with the caller: a failed note write warns rather
 	// than failing a create whose row already landed.
-	if _, err := ApplySourceProvenance(database, imageID, source, postID, commentary, original, nil); err != nil {
+	if _, err := ApplySourceProvenance(database, imageID, source, postID, commentary, translated, original, nil); err != nil {
 		return err
 	}
 	if collection != "" {

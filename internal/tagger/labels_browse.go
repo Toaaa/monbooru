@@ -33,8 +33,8 @@ func BrowseLabels(modelPath, taggerName, tagsFile string, catIDs map[string]int6
 	if err != nil {
 		return nil, err
 	}
-	embedded := compileEntries(parseEmbeddedDispatch(taggerName), catIDs)
-	overlay := compileEntries(parseOverlayDispatch(modelPath, taggerName), catIDs)
+	embedded := compileEntries(EmbeddedDispatchRules(taggerName), catIDs)
+	overlay := compileEntries(OverlayDispatchRules(modelPath, taggerName), catIDs)
 	empty := &DispatchTable{}
 
 	out := make([]LabelView, 0, len(labels))

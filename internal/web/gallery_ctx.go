@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -44,11 +45,6 @@ type galleryCtx struct {
 	// so "not cached" is distinguishable from "cached zero".
 	folderTree        atomic.Pointer[[]gallery.FolderNode]
 	sourceLabelCounts atomic.Pointer[[]gallery.SourceLabelCount]
-	visibleCount      atomic.Pointer[int]
-	inboxCount        atomic.Pointer[int]
-	tagCount          atomic.Pointer[int]
-	collectionsCount  atomic.Pointer[int]
-	phashMissing      atomic.Pointer[int]
 
 	// Parallel caches keyed by ceiling level, populated lazily on first
 	// access from a sidebar / relations-hub render under that ceiling
@@ -91,7 +87,7 @@ func (cx *galleryCtx) Sync(ctx context.Context, maxFileSizeMB int, naming galler
 // live DB; sub-service guards (RelationsSvc==nil, bkTree==nil) still
 // belong inline because they check different fields.
 func (s *Server) requireActive(w http.ResponseWriter) (*galleryCtx, bool) {
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.DB == nil {
 		http.Error(w, "no gallery", http.StatusServiceUnavailable)
 		return nil, false
@@ -110,11 +106,6 @@ func (cx *galleryCtx) InvalidateCaches() {
 	}
 	cx.folderTree.Store(nil)
 	cx.sourceLabelCounts.Store(nil)
-	cx.visibleCount.Store(nil)
-	cx.inboxCount.Store(nil)
-	cx.tagCount.Store(nil)
-	cx.collectionsCount.Store(nil)
-	cx.phashMissing.Store(nil)
 	cx.inboxCountUnder.Store(nil)
 	cx.phashMissingUnder.Store(nil)
 	cx.folderTreeUnder.Store(nil)
@@ -130,8 +121,9 @@ func (cx *galleryCtx) InvalidateCaches() {
 	search.AdjacencyCacheDropForGallery(cx.Name)
 }
 
-// cachedValue is cachedCount for arbitrary types: load slot or run
-// query and store on success.
+// cachedValue lazy-loads and caches a value: the atomic pointer doubles
+// as the cache slot and the "loaded?" flag, and nil means re-query. The
+// scalar tallies use counts.cachedCount, which is the same shape.
 func cachedValue[V any](slot *atomic.Pointer[V], query func() (V, error)) (V, error) {
 	if p := slot.Load(); p != nil {
 		return *p, nil
@@ -159,51 +151,24 @@ func (cx *galleryCtx) SourceLabelCounts() ([]gallery.SourceLabelCount, error) {
 	return cachedValue(&cx.sourceLabelCounts, func() ([]gallery.SourceLabelCount, error) { return gallery.SourceLabelCountsQuery(cx.DB, 25) })
 }
 
-// cachedCount lazy-loads and caches a scalar COUNT query. The atomic
-// pointer doubles as the cache slot and the "loaded?" flag; nil means
-// re-query.
-func (cx *galleryCtx) cachedCount(slot *atomic.Pointer[int], query string) (int, error) {
-	if p := slot.Load(); p != nil {
-		return *p, nil
+// The whole-library tallies live in internal/counts, which keys them by
+// *db.DB and drops them from InvalidateCaches above.
+func (cx *galleryCtx) VisibleCount() (int, bool) { return counts.VisibleCount(cx.DB) }
+func (cx *galleryCtx) InboxCount() (int, bool)   { return counts.InboxCount(cx.DB) }
+func (cx *galleryCtx) TagCount() (int, bool)     { return counts.TagCount(cx.DB) }
+
+func (cx *galleryCtx) CollectionsCount() (int, bool) { return counts.CollectionsCount(cx.DB) }
+
+// okErr adapts the counts package's (value, ok) shape to the error shape
+// the ceiling helpers take.
+func okErr(n int, ok bool) (int, error) {
+	if !ok {
+		return 0, errCountUnavailable
 	}
-	var n int
-	if err := cx.DB.Read.QueryRow(query).Scan(&n); err != nil {
-		return 0, err
-	}
-	slot.Store(&n)
 	return n, nil
 }
 
-// VisibleCount returns the cached count of non-missing images or queries it
-// on demand. Only used for the unfiltered gallery page - filtered searches
-// bypass the cache.
-func (cx *galleryCtx) VisibleCount() (int, error) {
-	return cx.cachedCount(&cx.visibleCount, `SELECT COUNT(*) FROM images WHERE is_missing = 0`)
-}
-
-// InboxCount returns the cached count of visible images sitting in the
-// inbox (is_inbox = 1, is_missing = 0). Surfaced in the gallery toolbar's
-// inbox toggle so the user sees the triage backlog at a glance. Reads
-// off idx_images_inbox_visible.
-func (cx *galleryCtx) InboxCount() (int, error) {
-	return cx.cachedCount(&cx.inboxCount, `SELECT COUNT(*) FROM images WHERE is_missing = 0 AND is_inbox = 1`)
-}
-
-// TagCount returns the cached count of non-alias tags or queries it on demand.
-// Surfaced in the Settings galleries table and the layout footer; uncached the
-// query runs once per render per gallery, which adds up on multi-gallery boxes.
-func (cx *galleryCtx) TagCount() (int, error) {
-	return cx.cachedCount(&cx.tagCount, `SELECT COUNT(*) FROM tags WHERE is_alias = 0`)
-}
-
-// CollectionsCount returns the cached count of distinct collection
-// labels across non-missing images, surfaced in the layout footer.
-// Reads the trigger-maintained per-label counts, so the re-pay on the
-// first render after any cache drop is one row per label.
-func (cx *galleryCtx) CollectionsCount() (int, error) {
-	return cx.cachedCount(&cx.collectionsCount,
-		`SELECT COUNT(*) FROM collection_counts WHERE visible_count > 0`)
-}
+var errCountUnavailable = errors.New("count unavailable")
 
 // lookupByCeiling reads a per-ceiling cache slot; returns (zero, false)
 // when the level isn't yet cached. Copy-on-write semantics: the caller
@@ -257,7 +222,7 @@ func ceilingCached[V any](c *Ceiling, blind func() (V, error), slot *atomic.Poin
 // whose tag list intersects the ceiling's excluded rating ids. An inactive
 // ceiling delegates to the blind InboxCount.
 func (cx *galleryCtx) InboxCountUnder(c *Ceiling) (int, error) {
-	return ceilingCached(c, cx.InboxCount, &cx.inboxCountUnder,
+	return ceilingCached(c, func() (int, error) { return okErr(cx.InboxCount()) }, &cx.inboxCountUnder,
 		func() (int, error) { return gallery.InboxCountUnder(cx.DB, c.ExcludedTagIDs()) })
 }
 
@@ -270,10 +235,7 @@ func (cx *galleryCtx) InboxCountUnder(c *Ceiling) (int, error) {
 // phash write (InvalidatePhashMissing).
 func (cx *galleryCtx) PhashMissingUnder(c *Ceiling) (int, error) {
 	return ceilingCached(c,
-		func() (int, error) {
-			return cx.cachedCount(&cx.phashMissing,
-				`SELECT COUNT(*) FROM images WHERE phash IS NULL AND is_missing = 0`)
-		},
+		func() (int, error) { return okErr(counts.PhashMissing(cx.DB)) },
 		&cx.phashMissingUnder,
 		func() (int, error) { return gallery.PhashMissingUnder(cx.DB, c.ExcludedTagIDs()) })
 }
@@ -286,7 +248,7 @@ func (cx *galleryCtx) InvalidatePhashMissing() {
 	if cx == nil {
 		return
 	}
-	cx.phashMissing.Store(nil)
+	counts.InvalidatePhashMissing(cx.DB)
 	cx.phashMissingUnder.Store(nil)
 }
 
@@ -315,10 +277,10 @@ func (cx *galleryCtx) warmCaches() {
 	}
 	cx.FolderTree()        //nolint:errcheck
 	cx.SourceLabelCounts() //nolint:errcheck
-	cx.VisibleCount()      //nolint:errcheck
-	cx.InboxCount()        //nolint:errcheck
-	cx.TagCount()          //nolint:errcheck
-	cx.CollectionsCount()  //nolint:errcheck
+	cx.VisibleCount()
+	cx.InboxCount()
+	cx.TagCount()
+	cx.CollectionsCount()
 }
 
 // openGalleryCtx opens the DB and creates the thumbnails directory. The
@@ -389,6 +351,12 @@ func (cx *galleryCtx) MangaCacheDir() string {
 func (cx *galleryCtx) close() {
 	cx.stopWatcher()
 	cx.stopMangaReclaim()
+	// The adjacency cache is keyed by gallery name, so an entry outlives the
+	// database it was read from unless it goes when that database does: an
+	// import, a repoint or a re-added name would serve the previous
+	// library's ids, and executeFromCachedIDs re-reads them by primary key
+	// without the query's WHERE.
+	search.AdjacencyCacheDropForGallery(cx.Name)
 	if cx.DB != nil {
 		relations.DefaultRegistry.Unregister(cx.DB)
 		counts.Release(cx.DB)
@@ -462,18 +430,18 @@ func (cx *galleryCtx) stopMangaReclaim() {
 	cx.mangaReclaim = nil
 }
 
-// Accessors below resolve to the active gallery's fields. The
-// ContextMiddleware RLock keeps the returned pointers stable per request.
+// Accessors below resolve to the active gallery's fields. A gallery-read
+// route's RLock keeps the returned pointers stable per request.
 
 func (s *Server) db() *db.DB {
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		return cx.DB
 	}
 	return nil
 }
 
 func (s *Server) tagSvc() *tags.Service {
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		return cx.TagSvc
 	}
 	return nil
@@ -501,14 +469,14 @@ func (s *Server) categoryIDByName(name string) (int64, bool) {
 }
 
 func (s *Server) galleryPath() string {
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		return cx.GalleryPath
 	}
 	return ""
 }
 
 func (s *Server) relationsSvc() *relations.Service {
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		return cx.RelationsSvc
 	}
 	return nil
@@ -537,14 +505,14 @@ func (s *Server) onImagesDeleteCallback() func(*sql.Tx, []int64) error {
 }
 
 func (s *Server) thumbnailsPath() string {
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		return cx.ThumbnailsPath
 	}
 	return ""
 }
 
 func (s *Server) dbPath() string {
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		return cx.DBPath
 	}
 	return ""

@@ -164,9 +164,15 @@ func label(body, fallback string, depth int) []node {
 	return parseNodes(body, depth+1, true)
 }
 
+// validURL compares the scheme in place rather than lowercasing s: the DText
+// converter calls it at every byte position that could start a link, with s
+// the whole rest of the body, so a copy per position is quadratic.
 func validURL(s string) bool {
-	lower := strings.ToLower(s)
-	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+	return hasSchemeFold(s, "http://") || hasSchemeFold(s, "https://")
+}
+
+func hasSchemeFold(s, scheme string) bool {
+	return len(s) >= len(scheme) && strings.EqualFold(s[:len(scheme)], scheme)
 }
 
 // Refs is the set of references a body points at, accumulated across every

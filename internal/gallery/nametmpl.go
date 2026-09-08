@@ -2,6 +2,7 @@ package gallery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -33,20 +34,11 @@ const (
 // Folder reports whether the scope names a directory rather than a file:
 // "/" separates instead of being refused, and an empty render is the
 // gallery root instead of a name that has to fall back.
-func (s Scope) Folder() bool {
-	return s == ScopeMove || s == ScopeMoveBatch || s == ScopeUploadFolder
-}
+func (s Scope) Folder() bool { return s == ScopeMove || s == ScopeMoveBatch || s == ScopeUploadFolder }
 
 func (s Scope) sequence() bool { return s == ScopeRenameBatch || s == ScopeMoveBatch }
 
 func (s Scope) source() bool { return s == ScopeUploadFolder || s == ScopeUploadName }
-
-func (s Scope) slashRefusal() string {
-	if s == ScopeUploadName {
-		return "a name carries no folder - set that in the folder field"
-	}
-	return "a rename stays in the folder - use Move to file it"
-}
 
 type nameToken int
 
@@ -68,6 +60,7 @@ const (
 	tokImgHeight
 	tokSize
 	tokOrigin
+	tokFolder
 	tokSeq
 	tokSource
 	tokPostID
@@ -78,7 +71,7 @@ var nameTokens = map[string]nameToken{
 	"hash": tokHash, "md5": tokMD5, "gallery": tokGallery, "date": tokDate,
 	"year": tokYear, "month": tokMonth, "day": tokDay, "time": tokTime,
 	"w": tokImgWidth, "h": tokImgHeight, "size": tokSize, "origin": tokOrigin,
-	"n": tokSeq, "source": tokSource, "post_id": tokPostID,
+	"folder": tokFolder, "n": tokSeq, "source": tokSource, "post_id": tokPostID,
 }
 
 // refusedNameTokens are the spellings people reach for that name something
@@ -143,7 +136,7 @@ func ParseNameTemplate(s string, sc Scope) (*NameTemplate, error) {
 			t.tokens = true
 			i += end + 1
 		case s[i] == '/' && !sc.Folder():
-			return nil, fmt.Errorf("%s", sc.slashRefusal())
+			return nil, errors.New("a name carries no folder - set that in the folder field")
 		default:
 			lit.WriteByte(s[i])
 			i++
@@ -165,6 +158,9 @@ func parseNameToken(inner string, sc Scope) (namePart, error) {
 	}
 	if tok == tokSeq && !sc.sequence() {
 		return namePart{}, fmt.Errorf("{n} needs a batch - use {id} to name one file")
+	}
+	if tok == tokFolder && !sc.Folder() {
+		return namePart{}, fmt.Errorf("{folder} is a destination - put it in the folder field")
 	}
 	if (tok == tokSource || tok == tokPostID) && !sc.source() {
 		return namePart{}, fmt.Errorf("{%s} is only available for received files", name)
@@ -284,23 +280,62 @@ func LoadNameFacts(ctx context.Context, database *db.DB, galleryName string, id 
 func (t *NameTemplate) Render(f NameFacts) (string, error) {
 	var b strings.Builder
 	for _, p := range t.parts {
-		if p.tok == tokLiteral {
+		switch p.tok {
+		case tokLiteral:
 			b.WriteString(p.lit)
-			continue
+		case tokFolder:
+			// The row's own directory is already root-bounded, and
+			// tidyNamePath cleans each of its segments.
+			b.WriteString(p.value(f))
+		default:
+			b.WriteString(SanitizeFilename(p.value(f)))
 		}
-		b.WriteString(SanitizeFilename(p.value(f)))
 	}
 	out := tidyNamePath(b.String())
 	switch {
 	case out != "":
 		return out, nil
-	case !t.scope.source():
-		return "", fmt.Errorf("the template names nothing for image %d", f.ID)
-	case t.scope.Folder():
+	// The gallery root is a real destination for a template that asked for
+	// {folder}: that is where a row sitting at the root already is.
+	case t.scope.Folder() && (t.scope.source() || t.namesFolder()):
 		return "", nil
-	default:
+	case t.scope.source():
 		return strconv.FormatInt(f.ID, 10), nil
+	default:
+		return "", fmt.Errorf("the template names nothing for image %d", f.ID)
 	}
+}
+
+// namesFolder reports whether the template carries {folder}.
+func (t *NameTemplate) namesFolder() bool {
+	for _, p := range t.parts {
+		if p.tok == tokFolder {
+			return true
+		}
+	}
+	return false
+}
+
+// identityTokens name one row and no other. Everything else a template can
+// carry - a date, a type, a gallery - groups rows rather than separating
+// them, however many distinct values a given library happens to hold.
+var identityTokens = map[nameToken]bool{
+	tokName: true, tokID: true, tokHash: true, tokMD5: true, tokSeq: true,
+}
+
+// PerImage reports whether the template renders to something different for
+// every row. In a folder scope that means a folder each, which no sampled
+// preview of the destination can show.
+func (t *NameTemplate) PerImage() bool {
+	if t == nil {
+		return false
+	}
+	for _, p := range t.parts {
+		if identityTokens[p.tok] {
+			return true
+		}
+	}
+	return false
 }
 
 func (p namePart) value(f NameFacts) string {
@@ -340,6 +375,8 @@ func (p namePart) value(f NameFacts) string {
 		return strconv.FormatInt(f.Size, 10)
 	case tokOrigin:
 		return f.Origin
+	case tokFolder:
+		return f.Folder
 	case tokSeq:
 		width := p.width
 		if width == 0 {

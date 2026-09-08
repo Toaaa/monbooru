@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -27,8 +28,9 @@ import (
 // rankPageBudget caps the cold back-link rank. It resolves which page
 // Back returns to when no cached match list settles it, and the render
 // blocks on the answer, so it gets a slice of the detail budget rather
-// than all of it.
-const rankPageBudget = 150 * time.Millisecond
+// than all of it. A var so a test asserting which page the query resolves
+// can pin the logic instead of the machine's speed.
+var rankPageBudget = 150 * time.Millisecond
 
 // annotationView is one positional note ready for the overlay: the box
 // geometry as CSS percentages of the rendered image so it scales at any size.
@@ -52,14 +54,19 @@ type annotationEntry struct {
 
 // sourcePanelView is one collapsible per-source provenance panel: the origin
 // plus the annotations it pulled. Built only for a source that carries
-// commentary, an original source, or at least one box, so a bare origin adds
-// no empty panel.
+// commentary, a translation, an original source, or at least one box, so a
+// bare origin adds no empty panel.
 type sourcePanelView struct {
 	models.ImageSource
 	Annotations    []annotationEntry
 	OriginalLines  []originalLine
 	CommentaryHTML template.HTML
-	doc            markup.Doc
+	TranslatedHTML template.HTML
+	// HasTranslationRow gates the Translation row: there is nothing to
+	// translate on an origin carrying neither body.
+	HasTranslationRow bool
+	doc               markup.Doc
+	transDoc          markup.Doc
 }
 
 // originalLine is one entry of an origin's newline-joined original source,
@@ -138,17 +145,20 @@ type detailData struct {
 	SourcePanels      []sourcePanelView     // per-source panels (commentary + pulled annotations) below the metadata
 	ManualAnnotations []annotationEntry     // operator-drawn boxes, edited under the image beside the Note
 	NoteHTML          template.HTML         // the operator's note, rendered
-	ImagePaths        []models.ImagePath
-	ThumbnailURL      string
-	PrevID            *int64
-	NextID            *int64
-	RefURL            string // predecessor detail URL when the user arrived via a Similar-images click; drives the "← Previous image" back link and Escape
-	Ref               string // raw ref=<sourceID> value when valid; forwarded on the delete button so the post-delete redirect returns to the source instead of an arbitrary neighbour
-	BackQuery         string
-	BackSort          string
-	BackOrder         string
-	BackPage          string
-	BackSeed          string
+	// ExtraPaths is how many sha-deduped copies the delete takes with the
+	// image, which the confirm names. The tag-list fragment re-renders the
+	// same partial, so both derive it the same way.
+	ExtraPaths   int
+	ThumbnailURL string
+	PrevID       *int64
+	NextID       *int64
+	RefURL       string // predecessor detail URL when the user arrived via a Similar-images click; drives the "← Previous image" back link and Escape
+	Ref          string // raw ref=<sourceID> value when valid; forwarded on the delete button so the post-delete redirect returns to the source instead of an arbitrary neighbour
+	BackQuery    string
+	BackSort     string
+	BackOrder    string
+	BackPage     string
+	BackSeed     string
 	// PrevBackPage / PrevBackIdx and their Next twins are the listing
 	// position the neighbour links hand on, so a walk that steps off the
 	// end of a page carries the next page's number with it instead of
@@ -225,7 +235,7 @@ func (s *Server) imageByHashHandler(w http.ResponseWriter, r *http.Request) {
 		if err := cx.DB.Read.QueryRow(`SELECT id FROM images WHERE sha256 = ?`, sha).Scan(&id); err != nil {
 			continue
 		}
-		if err := s.SwitchGallery(cx.Name); err != nil {
+		if err := s.switchGallery(cx.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
@@ -277,9 +287,9 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	wantAdjacent := refURL == "" && (backSort != "" || backQ != "")
 	if wantAdjacent {
 		backSort = cmp.Or(backSort, "newest")
-		backOrder = cmp.Or(backOrder, "desc")
+		backOrder = cmp.Or(backOrder, search.DefaultOrder(backSort))
 	}
-	ceiling := resolveCeiling(r, s.Active())
+	ceiling := resolveCeiling(r, s.active())
 
 	// Resolve back_page so Escape and "← Back" land on the page that
 	// actually contains the current image, even after prev/next walked
@@ -299,7 +309,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	// Set only while the page is still unresolved, so the post-adjacency
 	// read below knows whether to look again.
 	pendingKey := ""
-	pageSize := s.pageSize()
+	pageSize := s.pageSize(r)
 	posPage, posIdx, havePos := 0, 0, false
 	if p, err := strconv.Atoi(backPage); err == nil && p > 0 && pageSize > 0 {
 		if i, err := strconv.Atoi(backIdx); err == nil && i >= 0 && i < pageSize {
@@ -320,7 +330,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 			// A populated list settles the question either way: an image
 			// it does not carry is one the back_q no longer matches, and
 			// ranking it would answer a question nobody asked.
-			if page, found := s.pageOfMatch(ids, id); found {
+			if page, found := s.pageOfMatch(ids, id, pageSize); found {
 				backPage = page
 			}
 		case backSort == "similarity":
@@ -402,7 +412,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	go func() { defer wg.Done(); imagePaths = loadImagePaths(ctx, s.db(), id) }()
 	go func() { defer wg.Done(); collections, _ = gallery.CollectionsForImage(s.db(), id) }()
 	go func() { defer wg.Done(); sources, _ = gallery.SourcesForImage(s.db(), id) }()
-	go func() { defer wg.Done(); lookupState = s.lookupViewFor(s.Active(), id) }()
+	go func() { defer wg.Done(); lookupState = s.lookupViewFor(s.active(), id) }()
 	go func() { defer wg.Done(); annotations, _ = gallery.AnnotationsForImage(s.db(), id) }()
 	go func() {
 		defer wg.Done()
@@ -430,7 +440,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	if rankPage != "" {
 		backPage = rankPage
 	} else if ids, ok := search.AdjacencyCacheGet(pendingKey); ok {
-		if page, found := s.pageOfMatch(ids, id); found {
+		if page, found := s.pageOfMatch(ids, id, pageSize); found {
 			backPage = page
 		}
 	}
@@ -485,16 +495,20 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	var sourcePanels []sourcePanelView
 	for _, src := range sources {
 		boxes := annBySource[[2]string{src.Site, src.PostID}]
-		if src.Commentary == "" && src.Original == "" && len(boxes) == 0 {
+		if src.Commentary == "" && src.CommentaryTranslated == "" && src.Original == "" && len(boxes) == 0 {
 			continue
 		}
 		doc := markup.Parse(src.Commentary)
 		doc.Collect(mkRefs)
+		transDoc := markup.Parse(src.CommentaryTranslated)
+		transDoc.Collect(mkRefs)
 		sourcePanels = append(sourcePanels, sourcePanelView{
-			ImageSource:   src,
-			Annotations:   buildAnnotationEntries(boxes),
-			OriginalLines: buildOriginalLines(src.Original),
-			doc:           doc,
+			ImageSource:       src,
+			Annotations:       buildAnnotationEntries(boxes),
+			OriginalLines:     buildOriginalLines(src.Original),
+			HasTranslationRow: src.Commentary != "" || src.CommentaryTranslated != "",
+			doc:               doc,
+			transDoc:          transDoc,
 		})
 	}
 	mkRes := s.resolveMarkup(mkRefs)
@@ -503,6 +517,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range sourcePanels {
 		sourcePanels[i].CommentaryHTML = sourcePanels[i].doc.Render(mkRes)
+		sourcePanels[i].TranslatedHTML = sourcePanels[i].transDoc.Render(mkRes)
 	}
 
 	noPreview, previewNote := false, ""
@@ -519,11 +534,14 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	previewScaled := !isManga && !gallery.IsVideoType(img.FileType) && gallery.NeedsViewRendition(pxW, pxH)
 
 	baseName := filepath.Base(img.CanonicalPath)
-	// Prefix the immediate parent folder so a tab strip with several
-	// generic basenames (file.png, vol2.cbz, ...) stays distinguishable.
+	// Prefix the image's folder so a tab strip with several generic basenames
+	// (file.png, vol2.cbz, ...) stays distinguishable. It comes off the row,
+	// not off the path on disk: a file at the gallery root is in no folder,
+	// and naming the root directory there would name something no filter can
+	// address.
 	titleName := baseName
-	if parent := filepath.Base(filepath.Dir(img.CanonicalPath)); parent != "" && parent != "." && parent != "/" {
-		titleName = parent + "/" + baseName
+	if img.FolderPath != "" {
+		titleName = path.Base(img.FolderPath) + "/" + baseName
 	}
 	mangaHint := ""
 	if isManga {
@@ -556,7 +574,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		SourcePanels:      sourcePanels,
 		ManualAnnotations: buildAnnotationEntries(manualAnnotations),
 		NoteHTML:          noteDoc.Render(mkRes),
-		ImagePaths:        imagePaths,
+		ExtraPaths:        extraImagePaths(imagePaths),
 		ThumbnailURL:      fmt.Sprintf("/thumbnails/%s/%d.jpg", s.activeGallery(), id),
 		PrevID:            prevID,
 		NextID:            nextID,
@@ -654,12 +672,12 @@ func distinctTaggerNames(tags []models.ImageTag, auto bool) []string {
 // match list. Not found when the list no longer carries the image (it
 // was deleted, or it never matched the back_q), which leaves back_page
 // on whatever the URL carried.
-func (s *Server) pageOfMatch(ids []int64, id int64) (string, bool) {
+func (s *Server) pageOfMatch(ids []int64, id int64, pageSize int) (string, bool) {
 	i := slices.Index(ids, id)
 	if i < 0 {
 		return "", false
 	}
-	return strconv.Itoa(i/s.pageSize() + 1), true
+	return strconv.Itoa(i/pageSize + 1), true
 }
 
 // pageHoldingMatch names the page of q that carries id, looking at the
@@ -740,7 +758,7 @@ func (s *Server) md5CellGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.DB == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return

@@ -123,9 +123,7 @@ func (c CatalogEntry) curlSteps(targetDir string) []string {
 
 // HostCommand renders the `mkdir + curl` chain a user runs on the host
 // (no docker). Paths are relative to the model path.
-func (c CatalogEntry) HostCommand() string {
-	return strings.Join(c.curlSteps(c.Name), " && \\\n")
-}
+func (c CatalogEntry) HostCommand() string { return strings.Join(c.curlSteps(c.Name), " && \\\n") }
 
 // DockerCommand renders a `docker exec <container> sh -c '...'` chain that
 // drops model files into the container's /models mount. Container name
@@ -145,6 +143,4 @@ func (c CatalogEntry) DockerCommand(containerName string) string {
 
 // shellSingleQuote wraps s in shell single quotes, escaping any embedded
 // single quote with the standard `'\”` recipe.
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
+func shellSingleQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

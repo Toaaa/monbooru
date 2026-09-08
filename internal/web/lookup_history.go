@@ -159,7 +159,7 @@ func (s *Server) scheduledLookupPost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		externalErr(w, r, "no active gallery", http.StatusServiceUnavailable)
 		return
@@ -196,7 +196,7 @@ func (s *Server) scheduledLookupResetPost(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		externalErr(w, r, "no active gallery", http.StatusServiceUnavailable)
 		return

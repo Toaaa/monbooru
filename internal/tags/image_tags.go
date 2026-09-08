@@ -171,19 +171,10 @@ func addTagToImageTxReportingDup(tx *sql.Tx, imageID, tagID int64, isAuto bool, 
 	return true, false, nil
 }
 
-// TransitiveImpliedTx is the exported entrypoint for callers outside
-// the tags package (the implication propagation job in internal/web)
-// that need to walk the implication graph inside the same transaction
-// they already hold open, so a freshly-added edge is visible to the
-// walk.
-func TransitiveImpliedTx(tx *sql.Tx, parents []int64) ([]int64, error) {
-	return transitiveImpliedTx(tx, parents)
-}
-
-// transitiveImpliedTx walks the transitive implied-tag closure of
+// TransitiveImpliedTx walks the transitive implied-tag closure of
 // parents inside the transaction the caller already holds open, so a
 // freshly-added edge is visible.
-func transitiveImpliedTx(tx *sql.Tx, parents []int64) ([]int64, error) {
+func TransitiveImpliedTx(tx *sql.Tx, parents []int64) ([]int64, error) {
 	if len(parents) == 0 {
 		return nil, nil
 	}
@@ -515,7 +506,7 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) (int, error) {
 	// which implied rows might lose their last justifying parent. The
 	// closure only matters when the row being removed is itself a
 	// parent in the graph; for ordinary tags the SELECT comes back empty.
-	implied, err := transitiveImpliedTx(tx, []int64{tagID})
+	implied, err := TransitiveImpliedTx(tx, []int64{tagID})
 	if err != nil {
 		return 0, err
 	}
@@ -827,28 +818,7 @@ const relatedGeneralTagsCap = 15
 // RatingRank returns the position of name in RatingLevels (0-indexed,
 // general < sensitive < questionable < explicit). Returns -1 for any
 // non-canonical name.
-func RatingRank(name string) int {
-	return slices.Index(RatingLevels, name)
-}
-
-// PruneLowerRatingsTx keeps only the highest-rank rating tag on imageID.
-// When the image carries multiple rating-category rows (general <
-// sensitive < questionable < explicit) the lower-rank rows are removed
-// via removeTagFromImageTx so usage_count adjustment and the implied
-// closure cleanup match the rest of the tag-removal path. Idempotent:
-// after the call the image carries at most one rating tag.
-//
-// Both the manual add path (AddTagToImageReportingDup) and the auto-
-// tagger's storeResults call this so highest-rank-wins is the durable
-// invariant a fresh write upholds. fastCountCeiling and fastCountRating
-// rely on the invariant for their constant-time bounds.
-//
-// ratingCatID is the rating category id; pass 0 to skip (only possible
-// against a pre-bootstrap DB, where the four canonical rating rows
-// don't yet exist).
-func PruneLowerRatingsTx(tx *sql.Tx, ratingCatID, imageID int64) error {
-	return pruneLowerRatingsTx(tx, ratingCatID, imageID)
-}
+func RatingRank(name string) int { return slices.Index(RatingLevels, name) }
 
 // pruneRatingsAfterAddTx enforces the one-rating-per-image rule after a
 // rating tag is added. The rule splits on origin: a manual add overwrites
@@ -868,7 +838,7 @@ func pruneRatingsAfterAddTx(tx *sql.Tx, ratingCatID, imageID, tagID int64, isAut
 		return nil, nil
 	}
 	if isAuto {
-		return nil, pruneLowerRatingsTx(tx, ratingCatID, imageID)
+		return nil, PruneLowerRatingsTx(tx, ratingCatID, imageID)
 	}
 	return pruneOtherRatingsTx(tx, ratingCatID, imageID, tagID)
 }
@@ -890,7 +860,22 @@ func ratingRowsOnImageTx(tx *sql.Tx, ratingCatID, imageID int64) ([]ratingRow, e
 		imageID, ratingCatID)
 }
 
-func pruneLowerRatingsTx(tx *sql.Tx, ratingCatID, imageID int64) error {
+// PruneLowerRatingsTx keeps only the highest-rank rating tag on imageID.
+// When the image carries multiple rating-category rows (general <
+// sensitive < questionable < explicit) the lower-rank rows are removed
+// via removeTagFromImageTx so usage_count adjustment and the implied
+// closure cleanup match the rest of the tag-removal path. Idempotent:
+// after the call the image carries at most one rating tag.
+//
+// Both the manual add path (AddTagToImageReportingDup) and the auto-
+// tagger's storeResults call this so highest-rank-wins is the durable
+// invariant a fresh write upholds. fastCountCeiling and fastCountRating
+// rely on the invariant for their constant-time bounds.
+//
+// ratingCatID is the rating category id; pass 0 to skip (only possible
+// against a pre-bootstrap DB, where the four canonical rating rows
+// don't yet exist).
+func PruneLowerRatingsTx(tx *sql.Tx, ratingCatID, imageID int64) error {
 	if ratingCatID == 0 {
 		return nil
 	}
@@ -931,7 +916,7 @@ func pruneRatingsTx(tx *sql.Tx, imageID int64, present []ratingRow, keep func(ra
 	return displaced, nil
 }
 
-// pruneOtherRatingsTx is the manual-add twin of pruneLowerRatingsTx:
+// pruneOtherRatingsTx is the manual-add twin of PruneLowerRatingsTx:
 // it keeps only keepTagID and sweeps every other rating row off the
 // image so the user's just-typed rating always wins, even when its
 // rank is below an existing auto-tagger value. Mirrors the prune

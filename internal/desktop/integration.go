@@ -3,7 +3,6 @@ package desktop
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -63,12 +62,9 @@ func launchTarget() (string, []string) {
 	if id := os.Getenv("FLATPAK_ID"); id != "" {
 		return "flatpak", []string{"run", id, "-desktop"}
 	}
-	exe, err := os.Executable()
-	if err != nil {
+	exe := Program()
+	if exe == "" {
 		return "", nil
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
 	}
 	return exe, []string{"-desktop"}
 }

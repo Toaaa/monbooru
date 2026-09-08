@@ -89,9 +89,7 @@ func ValidateTagName(name string) (string, error) {
 // pass through it so a hydrus tag like `hatsune miku` is stored as
 // `hatsune_miku` instead of being rejected. Returns "" when nothing usable
 // remains.
-func NormalizeName(name string) string {
-	return strings.Trim(buildTagName(name, true), "_")
-}
+func NormalizeName(name string) string { return strings.Trim(buildTagName(name, true), "_") }
 
 func (s *Service) GetOrCreateTag(name string, categoryID int64) (*models.Tag, error) {
 	return s.GetOrCreateTagFrom(name, categoryID, "user")
@@ -843,7 +841,7 @@ func (s *Service) GetImageTags(imageID int64) (string, []models.ImageTag, error)
 // those by different keys. The returned closure is the set of implied
 // descendants the caller must RecalcIDs after commit.
 func deleteTagsTx(tx *sql.Tx, ids []int64) ([]int64, error) {
-	closure, err := transitiveImpliedTx(tx, ids)
+	closure, err := TransitiveImpliedTx(tx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("walk implied closure: %w", err)
 	}
@@ -852,7 +850,7 @@ func deleteTagsTx(tx *sql.Tx, ids []int64) ([]int64, error) {
 			return nil, fmt.Errorf("strip parent image_tags: %w", err)
 		}
 	}
-	// Tier order: transitiveImpliedTx returns BFS, so dropping rows in
+	// Tier order: TransitiveImpliedTx returns BFS, so dropping rows in
 	// that order makes deeper tiers see the now-gone upstream rows when
 	// they re-check whether any remaining parent on the image still
 	// justifies them.
@@ -994,19 +992,11 @@ func (s *Service) ratingRowName(id int64) (string, bool) {
 
 // RenameTag renames a tag. The new name must pass validation and must
 // not collide with another tag in the same category.
-func (s *Service) RenameTag(id int64, newName string) error {
-	return s.renameTag(id, newName, false)
-}
-
-// rowQuerier is the single-row read surface both *sql.DB and *sql.Tx
-// satisfy.
-type rowQuerier interface {
-	QueryRow(query string, args ...any) *sql.Row
-}
+func (s *Service) RenameTag(id int64, newName string) error { return s.renameTag(id, newName, false) }
 
 // nameTaken returns the id of another tag holding (name, catID), or 0
 // when the slot is free. exceptID is the row being renamed or moved.
-func nameTaken(q rowQuerier, name string, catID, exceptID int64) (int64, error) {
+func nameTaken(q db.RowQuerier, name string, catID, exceptID int64) (int64, error) {
 	var existing int64
 	switch err := q.QueryRow(
 		`SELECT id FROM tags WHERE name = ? AND category_id = ? AND id != ?`, name, catID, exceptID,
@@ -1128,8 +1118,10 @@ func (s *Service) ChangeTagCategory(tagID, newCategoryID int64) error {
 	}
 	// Moving in stays refused whatever the name: the category takes only
 	// its four canonical rows. Moving out is refused only for those rows.
-	if s.ratingCatID != 0 && (newCategoryID == s.ratingCatID ||
-		(currentCatID == s.ratingCatID && IsCanonicalRating(name))) {
+	if s.ratingCatID != 0 && newCategoryID == s.ratingCatID {
+		return ErrRatingCategoryClosed
+	}
+	if s.ratingCatID != 0 && currentCatID == s.ratingCatID && IsCanonicalRating(name) {
 		return ErrRatingTagImmutable
 	}
 	var catExists int

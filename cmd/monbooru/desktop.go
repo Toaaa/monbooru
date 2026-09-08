@@ -32,18 +32,40 @@ var defaultDesktop string
 const probeTimeout = 500 * time.Millisecond
 
 // desktopSeed adjusts the defaults a config file that does not exist yet is
-// written with: OS-native paths in place of the container mounts.
+// written with: OS-native paths in place of the container mounts. A portable
+// install takes its paths from the config package instead, which states the
+// whole beside-the-program layout in one place and keeps it relative.
 func desktopSeed(l desktop.Layout) func(*config.Config) {
 	return func(cfg *config.Config) {
-		cfg.Paths.DataPath = l.DataDir
-		cfg.Paths.ModelPath = filepath.Join(l.DataDir, "models")
+		if !l.Portable {
+			cfg.Paths.DataPath = l.DataDir
+			cfg.Paths.ModelPath = filepath.Join(l.DataDir, "models")
+			cfg.Galleries[0].GalleryPath = seedGalleryDir(l)
+		}
 		// A desktop sleeps through 01:00 more often than not, so a fresh
 		// config gets the mode that notices and runs the missed pass.
 		cfg.Schedule.Mode = config.ScheduleAtTimeCatchup
 		// The log file is the only thing a desktop bug report can carry, and
 		// nothing writes at the warn default while the app is healthy.
 		cfg.Log.Level = "info"
-		cfg.Galleries[0].GalleryPath = seedGalleryDir(l)
+	}
+}
+
+// portableGallery creates the folder a portable install watches, for the
+// same reason seedGalleryDir does: an absent one boots into degraded mode.
+// Only the folder the archive itself promises - a config pointing at
+// another disk that is not mounted is honestly degraded, not ours to fill in.
+func portableGallery(l desktop.Layout, cfg *config.Config) {
+	g := cfg.FindGallery(cfg.DefaultGallery)
+	if g == nil {
+		return
+	}
+	dir := filepath.Join(l.ConfigDir, "gallery")
+	if g.GalleryPath != dir {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logx.Warnf("could not create a gallery folder at %s: %v", dir, err)
 	}
 }
 
@@ -106,9 +128,9 @@ func claimPort(addr string, openBrowser bool) (string, bool) {
 // -no-browser is added because the page that asked for the restart is
 // already open and reloads itself; a second tab would be noise.
 func relaunch() {
-	exe, err := os.Executable()
-	if err != nil {
-		logx.Errorf("restart: locating this executable: %v", err)
+	exe := desktop.Program()
+	if exe == "" {
+		logx.Errorf("restart: locating this executable")
 		return
 	}
 	args := os.Args[1:]

@@ -229,7 +229,7 @@ func (s *Server) runOnlineLookupPhase(ctx context.Context, cx *galleryCtx) (onli
 				res.skipped++
 				continue
 			}
-			jobID, eerr := s.EnqueueHashLookup(ctx, c.id, cx.Name, lookup.BackendBooru, md5, c.sha256, true, true)
+			jobID, eerr := s.enqueueHashLookup(ctx, c.id, cx.Name, lookup.BackendBooru, md5, c.sha256, true, true)
 			switch {
 			case errors.Is(eerr, errLookupBudgetSpent):
 				res.budgetSpent = true
@@ -280,12 +280,12 @@ func (s *Server) scheduledOnlineLookup(cx *galleryCtx) error {
 		summary += fmt.Sprintf(" %d still due.", res.stillDue)
 	}
 	s.jobs.Complete(summary)
-	s.recordLookupRun(summary)
+	s.sched.recordLookup(summary)
 	// A monloader dropping most of a night's work is an uptime problem the
 	// operator has to be told about, not a phase that quietly achieves
 	// nothing.
 	if res.resolved > 0 && res.inconclusive*2 > res.resolved {
-		s.recordLookupRun(fmt.Sprintf("[%s] Online lookup: monloader dropped %d of the %d lookups queued last run.",
+		s.sched.recordLookup(fmt.Sprintf("[%s] Online lookup: monloader dropped %d of the %d lookups queued last run.",
 			cx.Name, res.inconclusive, res.resolved))
 	}
 	return nil
@@ -297,7 +297,7 @@ func (s *Server) scheduledOnlineLookup(cx *galleryCtx) error {
 // day's quota; forcing a specific slice is what the `lookup:` filter plus the
 // batch action are for.
 func (s *Server) lookupDuePost(w http.ResponseWriter, r *http.Request) {
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		writeInlineFlash(w, "err", "no active gallery")
 		return
@@ -376,6 +376,6 @@ func (s *Server) scheduledPTRLookup(cx *galleryCtx) error {
 		summary = fmt.Sprintf("[%s] PTR lookup: nothing to check; the index has not moved since the last run.", cx.Name)
 	}
 	s.jobs.Complete(summary)
-	s.recordLookupRun(summary)
+	s.sched.recordLookup(summary)
 	return nil
 }

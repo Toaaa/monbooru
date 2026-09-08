@@ -43,7 +43,6 @@ var (
 const (
 	wmDestroy      = 0x0002
 	wmClose        = 0x0010
-	wmCommand      = 0x0111
 	wmLButtonUp    = 0x0202
 	wmRButtonUp    = 0x0205
 	wmTrayCallback = 0x0400 + 1 // WM_APP + 1

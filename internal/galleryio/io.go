@@ -199,6 +199,7 @@ type ImageSourceRow struct {
 	URL         string  `json:"url"`
 	MD5         string  `json:"md5"`
 	Commentary  string  `json:"commentary"`
+	Translated  string  `json:"commentary_translated,omitempty"`
 	Original    string  `json:"original,omitempty"`
 	Similarity  float64 `json:"similarity,omitempty"`
 	MD5Match    string  `json:"md5_match,omitempty"`
@@ -438,12 +439,12 @@ func ExportGalleryJSON(cx gallery.Handle, w io.Writer) error {
 		`SELECT name FROM collection_find_relations ORDER BY name`,
 		scanRow(func(r *FindRelationsRow) []any { return []any{&r.Name} }))
 	streamRows(bw, "image_sources", cx.DB,
-		`SELECT image_id, site, post_id, url, md5, commentary, original, similarity,
+		`SELECT image_id, site, post_id, url, md5, commentary, commentary_translated, original, similarity,
 		        md5_match, parent_url, upgrade_kept, post_width, post_height, post_size, post_ext, fetched_at
 		 FROM image_sources ORDER BY rowid`,
 		func(rows *sql.Rows) (any, error) {
 			var r ImageSourceRow
-			err := rows.Scan(&r.ImageID, &r.Site, &r.PostID, &r.URL, &r.MD5, &r.Commentary, &r.Original, &r.Similarity,
+			err := rows.Scan(&r.ImageID, &r.Site, &r.PostID, &r.URL, &r.MD5, &r.Commentary, &r.Translated, &r.Original, &r.Similarity,
 				&r.MD5Match, &r.ParentURL, &r.UpgradeKept, &r.PostWidth, &r.PostHeight, &r.PostSize, &r.PostExt, &r.FetchedAt)
 			return r, err
 		})
@@ -510,7 +511,7 @@ func ExportGalleryJSON(cx gallery.Handle, w io.Writer) error {
 		`SELECT child_image_id, parent_image_id, created_at FROM version_edges ORDER BY child_image_id`,
 		scanRow(func(r *VersionEdgeRow) []any { return []any{&r.ChildImageID, &r.ParentImageID, &r.CreatedAt} }))
 	streamRows(bw, "derivative_edges", cx.DB,
-		`SELECT derivative_image_id, source_image_id, created_at FROM derivative_edges ORDER BY derivative_image_id`,
+		`SELECT derivative_image_id, source_image_id, created_at FROM derivative_edges ORDER BY derivative_image_id, source_image_id`,
 		scanRow(func(r *DerivativeEdgeRow) []any { return []any{&r.DerivativeImageID, &r.SourceImageID, &r.CreatedAt} }))
 	streamRows(bw, "not_related_pairs", cx.DB,
 		`SELECT a_image_id, b_image_id, created_at FROM not_related_pairs ORDER BY a_image_id, b_image_id`,
@@ -1290,14 +1291,15 @@ func scanRow[T any](fields func(*T) []any) func(*sql.Rows) (any, error) {
 }
 
 // insertAll writes one row per element, mapping each to its argument list.
-// label names the table and the first argument names the row, which is what
-// an import failure has to carry: a constraint violation is only actionable
-// when it says which row broke.
+// label names the table and the leading arguments name the row, which is
+// what an import failure has to carry: a constraint violation is only
+// actionable when it says which row broke. Two of them, because the tables
+// whose key is a pair are the ones that collide.
 func insertAll[T any](tx *sql.Tx, label, query string, rows []T, args func(T) []any) error {
 	for _, r := range rows {
 		a := args(r)
 		if _, err := tx.Exec(query, a...); err != nil {
-			return fmt.Errorf("insert %s %v: %w", label, a[0], err)
+			return fmt.Errorf("insert %s %v: %w", label, a[:min(2, len(a))], err)
 		}
 	}
 	return nil
@@ -1377,13 +1379,12 @@ func loadExportIntoDB(database *db.DB, exp Export) error {
 		}); err != nil {
 		return err
 	}
-	for _, r := range exp.TagImplications {
-		if _, err := tx.Exec(
-			`INSERT INTO tag_implications (parent_tag_id, implied_tag_id, created_at, origin, stale) VALUES (?, ?, ?, ?, ?)`,
-			r.ParentTagID, r.ImpliedTagID, r.CreatedAt, r.Origin, r.Stale,
-		); err != nil {
-			return fmt.Errorf("insert tag_implication (%d→%d): %w", r.ParentTagID, r.ImpliedTagID, err)
-		}
+	if err := insertAll(tx, "tag_implication",
+		`INSERT INTO tag_implications (parent_tag_id, implied_tag_id, created_at, origin, stale) VALUES (?, ?, ?, ?, ?)`,
+		exp.TagImplications, func(r TagImplicationRow) []any {
+			return []any{r.ParentTagID, r.ImpliedTagID, r.CreatedAt, r.Origin, r.Stale}
+		}); err != nil {
+		return err
 	}
 	// A pre-v10 document carries no scheduled-lookup opt-in, and the
 	// schema default is on; reading the absent field as 0 would opt every
@@ -1415,29 +1416,27 @@ func loadExportIntoDB(database *db.DB, exp Export) error {
 			return fmt.Errorf("seed image_collections: %w", err)
 		}
 	}
-	for _, r := range exp.ImageCollections {
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO image_collections (image_id, name, position) VALUES (?, ?, ?)`,
-			r.ImageID, r.Name, r.Position,
-		); err != nil {
-			return fmt.Errorf("insert image_collection (%d,%q): %w", r.ImageID, r.Name, err)
-		}
+	if err := insertAll(tx, "image_collection",
+		`INSERT OR IGNORE INTO image_collections (image_id, name, position) VALUES (?, ?, ?)`,
+		exp.ImageCollections, func(r ImageCollectionRow) []any {
+			return []any{r.ImageID, r.Name, r.Position}
+		}); err != nil {
+		return err
 	}
 	if err := insertAll(tx, "collection_find_relations",
 		`INSERT OR IGNORE INTO collection_find_relations (name) VALUES (?)`,
 		exp.FindRelations, func(r FindRelationsRow) []any { return []any{r.Name} }); err != nil {
 		return err
 	}
-	for _, r := range exp.ImageSources {
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO image_sources (image_id, site, post_id, url, md5, commentary, original, similarity,
-			                                     md5_match, parent_url, upgrade_kept, post_width, post_height, post_size, post_ext, fetched_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			r.ImageID, r.Site, r.PostID, r.URL, r.MD5, r.Commentary, r.Original, r.Similarity,
-			r.MD5Match, r.ParentURL, r.UpgradeKept, r.PostWidth, r.PostHeight, r.PostSize, r.PostExt, r.FetchedAt,
-		); err != nil {
-			return fmt.Errorf("insert image_source (%d,%q): %w", r.ImageID, r.Site, err)
-		}
+	if err := insertAll(tx, "image_source",
+		`INSERT OR IGNORE INTO image_sources (image_id, site, post_id, url, md5, commentary, commentary_translated, original, similarity,
+		                                     md5_match, parent_url, upgrade_kept, post_width, post_height, post_size, post_ext, fetched_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		exp.ImageSources, func(r ImageSourceRow) []any {
+			return []any{r.ImageID, r.Site, r.PostID, r.URL, r.MD5, r.Commentary, r.Translated, r.Original, r.Similarity,
+				r.MD5Match, r.ParentURL, r.UpgradeKept, r.PostWidth, r.PostHeight, r.PostSize, r.PostExt, r.FetchedAt}
+		}); err != nil {
+		return err
 	}
 	if err := insertAll(tx, "image_annotation (image)",
 		`INSERT INTO image_annotations (image_id, site, post_id, x, y, w, h, body, manual, fetched_at)
@@ -1568,13 +1567,17 @@ func loadExportIntoDB(database *db.DB, exp Export) error {
 		}); err != nil {
 		return err
 	}
-	for _, r := range exp.NotRelatedPairs {
-		if _, err := tx.Exec(
-			`INSERT INTO not_related_pairs (a_image_id, b_image_id, created_at) VALUES (?, ?, ?)`,
-			r.AImageID, r.BImageID, r.CreatedAt,
-		); err != nil {
-			return fmt.Errorf("insert not_related_pair (%d,%d): %w", r.AImageID, r.BImageID, err)
-		}
+	// The table is keyed (a < b) and the relations service only ever
+	// matches that shape. A document written by an older version, or by
+	// hand, can carry the pair the other way round, so it is normalised
+	// here rather than restored as it stands; OR IGNORE because a document
+	// carrying both orientations then names one row twice.
+	if err := insertAll(tx, "not_related_pair",
+		`INSERT OR IGNORE INTO not_related_pairs (a_image_id, b_image_id, created_at) VALUES (?, ?, ?)`,
+		exp.NotRelatedPairs, func(r NotRelatedPairRow) []any {
+			return []any{min(r.AImageID, r.BImageID), max(r.AImageID, r.BImageID), r.CreatedAt}
+		}); err != nil {
+		return err
 	}
 	if err := insertAll(tx, "saved_search",
 		`INSERT INTO saved_searches (id, name, query, sort, sort_order, seed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,

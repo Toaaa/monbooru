@@ -2,15 +2,14 @@
 <div id="detail-danger-zone"{{if .OOB}} hx-swap-oob="true"{{end}}>
   <div class="danger-zone">
     {{if .ImageTags}}
-    <button type="button" class="btn-warning" onclick="openRemoveTagsDialog()">Remove tag(s)...</button>
+    <button type="button" id="remove-tags-btn" class="btn-warning" onclick="openRemoveTagsDialog()">Remove tag(s)...</button>
     {{end}}
     {{if .CanTransfer}}
-    <button type="button" class="danger-zone-trailing"
+    <button type="button" id="transfer-image-btn" class="danger-zone-trailing"
             onclick="openTransferImageDialog()">Transfer to another gallery</button>
     {{end}}
     <button type="button"{{if not .CanTransfer}} class="danger-zone-trailing"{{end}}
-            onclick="openRenameImageDialog()">Rename image</button>
-    <button type="button" onclick="openMoveImageDialog()">Move image</button>
+            onclick="openPlaceImageDialog()">Rename / move...</button>
     <button class="btn-danger"
             id="delete-image-btn"
             hx-delete="/images/{{.ImageID}}?back_q={{urlQ .BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}{{if .Ref}}&ref={{.Ref}}{{end}}"
@@ -46,71 +45,51 @@
         {{if .HasStaleTags}}<label style="display:block"><input type="radio" name="mode" value="stale"> Stale tags</label>{{end}}
         <label style="display:block"><input type="radio" name="mode" value="all"> All tags</label>
       </div>
-      <div class="dialog-actions">
-        <button type="submit" class="btn-warning">Remove</button>
-        <button type="button" onclick="document.getElementById('remove-tags-dialog').close()">Cancel</button>
-      </div>
+      {{template "dialog_actions" dict "ID" "remove-tags-dialog" "Submit" "Remove" "Class" "btn-warning"}}
     </form>
   </dialog>
   {{end}}
 
-  <dialog id="rename-image-dialog" data-filename="{{.Filename}}">
-    <p>Rename this image's file:</p>
-    <p class="field-hint">The extension is kept; a name collision auto-suffixes.</p>
-    <form id="rename-image-form"
-          hx-post="/images/{{.ImageID}}/rename"
-          hx-swap="none"
+  <dialog id="place-image-dialog" data-filename="{{.Filename}}" data-current-folder="{{.CurrentFolder}}">
+    <p>Rename / move this image:</p>
+    <form id="place-image-form"
+          hx-post="/images/{{.ImageID}}/place"
+          hx-target="#place-image-error" hx-swap="innerHTML"
           hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <div class="field">
-        <input type="text" name="name" id="rename-image-name" class="upload-wide-input"
-               placeholder="New file name or template..." required autocomplete="off">
-        {{template "partials/name_tokens.html" (dict "Target" "rename-image-name")}}
-        <div id="rename-image-preview"
+        <div class="dest-row">
+          <div class="dest-part">
+            <label for="place-image-folder">folder</label>
+            <input type="text" name="folder" id="place-image-folder" autocomplete="off"
+                   hx-get="/internal/folders/suggest"
+                   hx-trigger="input changed delay:200ms"
+                   hx-target="#place-image-suggest"
+                   hx-swap="innerHTML"
+                   hx-vals='js:{prefix: document.getElementById("place-image-folder").value}'
+                   onkeydown="handleSuggestKey(event, 'place-image-suggest', 'place-image-folder')">
+            <div id="place-image-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
+          </div>
+          <span class="dest-sep" aria-hidden="true">/</span>
+          <div class="dest-part">
+            <label for="place-image-name">name</label>
+            <input type="text" name="name" id="place-image-name" autocomplete="off">
+          </div>
+        </div>
+        <div class="dest-hints">
+          <span class="field-hint">Blank = the gallery root.</span>
+          <span class="field-hint">The extension is kept.</span>
+        </div>
+        {{template "partials/name_tokens.html" (dict "Targets" "place-image-folder place-image-name" "Folder" true)}}
+        <div id="place-image-preview"
              hx-get="/internal/name/preview"
-             hx-trigger="input delay:200ms from:#rename-image-name"
+             hx-trigger="input delay:200ms from:#place-image-folder, input delay:200ms from:#place-image-name, preview"
              hx-target="this"
-             hx-vals='js:{tmpl: document.getElementById("rename-image-name").value, scope: "rename", ids: "{{.ImageID}}"}'
+             hx-vals='js:{scope: "place", ids: "{{.ImageID}}", folder: document.getElementById("place-image-folder").value, name: document.getElementById("place-image-name").value}'
              hx-swap="innerHTML"></div>
       </div>
-      <div class="dialog-actions">
-        <button type="submit">Rename</button>
-        <button type="button" onclick="document.getElementById('rename-image-dialog').close()">Cancel</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog id="move-image-dialog" data-current-folder="{{.CurrentFolder}}">
-    <p>Move this image to folder:</p>
-    <p class="field-hint">Currently in <code>{{if .CurrentFolder}}{{.CurrentFolder}}{{else}}/ (gallery root){{end}}</code></p>
-    <p class="field-hint">Path is relative to the gallery root. Subfolders are created automatically. Absolute paths and <code>..</code> segments are rejected.</p>
-    <form id="move-image-form"
-          hx-post="/images/{{.ImageID}}/move"
-          hx-swap="none"
-          hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>
-      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-      <div class="field" style="position:relative">
-        <input type="text" name="folder" id="move-image-folder" class="upload-wide-input"
-               placeholder="Destination path... (blank = gallery root)" autocomplete="off"
-               hx-get="/internal/folders/suggest"
-               hx-trigger="input changed delay:200ms"
-               hx-target="#move-image-suggest"
-               hx-swap="innerHTML"
-               hx-vals='js:{prefix: document.getElementById("move-image-folder").value}'
-               onkeydown="handleSuggestKey(event, 'move-image-suggest', 'move-image-folder')">
-        <div id="move-image-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
-        {{template "partials/name_tokens.html" (dict "Target" "move-image-folder")}}
-        <div id="move-image-preview"
-             hx-get="/internal/name/preview"
-             hx-trigger="input delay:200ms from:#move-image-folder"
-             hx-target="this"
-             hx-vals='js:{tmpl: document.getElementById("move-image-folder").value, scope: "move", ids: "{{.ImageID}}"}'
-             hx-swap="innerHTML"></div>
-      </div>
-      <div class="dialog-actions">
-        <button type="submit">Move</button>
-        <button type="button" onclick="document.getElementById('move-image-dialog').close()">Cancel</button>
-      </div>
+      <div id="place-image-error"></div>
+      {{template "dialog_actions" dict "ID" "place-image-dialog" "Submit" "Rename / move"}}
     </form>
   </dialog>
 

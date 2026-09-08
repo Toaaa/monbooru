@@ -10,12 +10,12 @@ import (
 // Pointer fields are nil-friendly so the client can tell the
 // difference between "no parent version" and "parent id 0".
 type relationsResponse struct {
-	DuplicateGroup   *dupGroupJSON `json:"duplicate_group"`
-	AlternateGroup   *altGroupJSON `json:"alternate_group"`
-	VersionParent    *int64        `json:"version_parent"`
-	VersionChild     *int64        `json:"version_child"`
-	DerivativeSource *int64        `json:"derivative_source"`
-	Derivatives      []int64       `json:"derivatives"`
+	DuplicateGroup    *dupGroupJSON `json:"duplicate_group"`
+	AlternateGroup    *altGroupJSON `json:"alternate_group"`
+	VersionParent     *int64        `json:"version_parent"`
+	VersionChild      *int64        `json:"version_child"`
+	DerivativeSources []int64       `json:"derivative_sources"`
+	Derivatives       []int64       `json:"derivatives"`
 }
 
 type dupGroupJSON struct {
@@ -40,10 +40,10 @@ func (h *Handler) relationsForImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := relationsResponse{
-		VersionParent:    rels.VersionParent,
-		VersionChild:     rels.VersionChild,
-		DerivativeSource: rels.DerivativeSource,
-		Derivatives:      rels.Derivatives,
+		VersionParent:     rels.VersionParent,
+		VersionChild:      rels.VersionChild,
+		DerivativeSources: rels.DerivativeSources,
+		Derivatives:       rels.Derivatives,
 	}
 	if rels.DupGroup != nil {
 		resp.DuplicateGroup = &dupGroupJSON{
@@ -61,7 +61,10 @@ func (h *Handler) relationsForImage(w http.ResponseWriter, r *http.Request) {
 	if resp.Derivatives == nil {
 		resp.Derivatives = []int64{}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	if resp.DerivativeSources == nil {
+		resp.DerivativeSources = []int64{}
+	}
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 // relationsAddBody is the JSON shape POST /api/v1/relations expects.
@@ -107,7 +110,7 @@ func (h *Handler) addRelation(w http.ResponseWriter, r *http.Request) {
 		// left is the parent (older revision), right the child.
 		err = g.RelationsSvc.AddVersionEdge(left, right)
 	case "derivative":
-		// left is the source, right the derivative.
+		// left is a source, right the derivative.
 		err = g.RelationsSvc.AddDerivativeEdge(left, right)
 	case "not_related":
 		err = g.RelationsSvc.AddNotRelated(left, right)

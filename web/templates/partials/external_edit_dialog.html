@@ -1,0 +1,15 @@
+{{define "partials/external_edit_dialog_head.html"}}
+  <dialog id="{{.Stem}}-dialog">
+    <form id="{{.Stem}}-form" hx-post="/images/{{.ImageID}}/{{.Action}}"
+          hx-target="#{{.Stem}}-error"
+          hx-swap="innerHTML"
+          hx-on::after-request="onExternalEditResponse(event, '{{.Stem}}-dialog')">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+{{end}}
+
+{{define "partials/external_edit_dialog_tail.html"}}
+      <div id="{{.Stem}}-error"></div>
+      {{template "dialog_actions" dict "ID" (printf "%s-dialog" .Stem) "Submit" "Save"}}
+    </form>
+  </dialog>
+{{end}}

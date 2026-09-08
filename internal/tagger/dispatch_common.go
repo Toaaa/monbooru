@@ -49,8 +49,8 @@ func DispatchTargetCategories(modelPath, taggerName string) []string {
 			out = append(out, e.Category)
 		}
 	}
-	add(parseEmbeddedDispatch(taggerName))
-	add(parseOverlayDispatch(modelPath, taggerName))
+	add(EmbeddedDispatchRules(taggerName))
+	add(OverlayDispatchRules(modelPath, taggerName))
 	return out
 }
 
@@ -59,10 +59,12 @@ func DispatchTargetCategories(modelPath, taggerName string) []string {
 // alone; the settings table uses that as its "differs from stock"
 // signal and the row summary shows the count.
 func OverlayRuleCount(modelPath, taggerName string) int {
-	return len(parseOverlayDispatch(modelPath, taggerName))
+	return len(OverlayDispatchRules(modelPath, taggerName))
 }
 
-func parseEmbeddedDispatch(taggerName string) []DispatchEntry {
+// EmbeddedDispatchRules returns the shipped default rules for one
+// tagger, in file order. Empty for taggers without an embedded table.
+func EmbeddedDispatchRules(taggerName string) []DispatchEntry {
 	data, err := defaultDispatchFS.ReadFile("dispatch_default/" + taggerName + ".json")
 	if err != nil {
 		return nil
@@ -70,7 +72,9 @@ func parseEmbeddedDispatch(taggerName string) []DispatchEntry {
 	return parseDispatchDoc(data, "embedded "+taggerName)
 }
 
-func parseOverlayDispatch(modelPath, taggerName string) []DispatchEntry {
+// OverlayDispatchRules returns the rules of the tagger's on-disk
+// overlay, in file order. Empty when no overlay exists.
+func OverlayDispatchRules(modelPath, taggerName string) []DispatchEntry {
 	p := filepath.Join(modelPath, taggerName, "dispatch.json")
 	data, err := os.ReadFile(p)
 	if err != nil {

@@ -52,17 +52,37 @@ func parseFormOK(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// CSRFMiddleware validates the CSRF token on mutating requests.
+// requiredFormFlash reads a trimmed form value, answering msg as an inline
+// flash-err when it is empty. requiredFormExternal is the same read for the
+// handlers whose refusals go out through externalErr. Both report false only
+// after writing, so the caller just returns.
+func requiredFormFlash(w http.ResponseWriter, r *http.Request, field, msg string) (string, bool) {
+	v := strings.TrimSpace(r.FormValue(field))
+	if v == "" {
+		flashStatus(w, http.StatusBadRequest, msg)
+		return "", false
+	}
+	return v, true
+}
+
+func requiredFormExternal(w http.ResponseWriter, r *http.Request, field, msg string) (string, bool) {
+	v := strings.TrimSpace(r.FormValue(field))
+	if v == "" {
+		externalErr(w, r, msg, http.StatusBadRequest)
+		return "", false
+	}
+	return v, true
+}
+
+// cSRFMiddleware validates the CSRF token on mutating requests.
 // /api/v1/ routes are exempt (bearer token serves as CSRF mitigation).
-func (s *Server) CSRFMiddleware(next http.Handler) http.Handler {
+func (s *Server) cSRFMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only validate on state-changing methods
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// API routes are exempt
 		if len(r.URL.Path) >= 8 && r.URL.Path[:8] == "/api/v1/" {
 			next.ServeHTTP(w, r)
 			return
@@ -104,7 +124,7 @@ func (s *Server) CSRFMiddleware(next http.Handler) http.Handler {
 
 // isMultipart returns true when the request's Content-Type top-level
 // type is multipart (multipart/form-data, multipart/related, etc.).
-// Used to skip the body-draining FormValue fallback in CSRFMiddleware.
+// Used to skip the body-draining FormValue fallback in cSRFMiddleware.
 func isMultipart(r *http.Request) bool {
 	ct := r.Header.Get("Content-Type")
 	if ct == "" {

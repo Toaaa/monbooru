@@ -224,7 +224,7 @@ jobs:
       - name: Install the build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl gcc git libc6-dev tar xz-utils
+          apt-get install -y --no-install-recommends ca-certificates curl file gcc git libc6-dev tar xz-utils
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -247,6 +247,12 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
         run: ./packaging/build-binaries.sh bundled
+
+      - name: Build the AppImage
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: ./packaging/build-appimage.sh
 
       - name: Upload
         uses: actions/upload-artifact@v7
@@ -307,20 +313,6 @@ jobs:
       - name: Let bwrap open a user namespace
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - name: Check the route to flathub
-        run: |
-          probe=https://dl.flathub.org/repo/config
-          getent hosts dl.flathub.org || true
-          v4=0
-          v6=0
-          curl -4 -fsS --max-time 30 -o /dev/null \
-            -w 'ipv4: %{http_code} in %{time_total}s from %{remote_ip}\n' "$probe" && v4=1 || echo "ipv4: no answer"
-          curl -6 -fsS --max-time 30 -o /dev/null \
-            -w 'ipv6: %{http_code} in %{time_total}s from %{remote_ip}\n' "$probe" && v6=1 || echo "ipv6: no answer"
-          if [ "$v4" = 1 ] && [ "$v6" = 0 ]; then
-            echo "ipv6 is broken here; preferring ipv4"
-            echo 'precedence ::ffff:0:0/96  100' | sudo tee -a /etc/gai.conf
-          fi
 
       - name: Build the bundle
         run: ./packaging/flatpak-bundle.sh
@@ -330,6 +322,25 @@ jobs:
         with:
           name: binaries-flatpak
           path: dist/*
+          if-no-files-found: error
+
+  aur:
+    name: AUR package files
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build the PKGBUILD and .SRCINFO
+        run: ./packaging/build-aur.sh
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: aur
+          path: dist/aur
           if-no-files-found: error
 
   attach:
@@ -344,6 +355,10 @@ jobs:
           path: dist
           pattern: binaries-*
           merge-multiple: true
+
+      - name: Checksum every artifact
+        working-directory: dist
+        run: sha256sum -- * > ../SHA256SUMS && mv ../SHA256SUMS .
 
       - name: Attach
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2

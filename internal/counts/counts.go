@@ -40,6 +40,15 @@ type cache struct {
 	// countedTags caches the per-image counted-tag totals the overlap
 	// score divides by. Dropped alongside the counts above.
 	countedTags atomic.Pointer[CountedTags]
+	// The remaining whole-library tallies the sidebar, the toolbar and the
+	// footer render on every page. Cheap individually, but each is a scan
+	// the render would otherwise repeat per request.
+	inboxCount       atomic.Pointer[int]
+	tagCount         atomic.Pointer[int]
+	collectionsCount atomic.Pointer[int]
+	// phashMissing has its own invalidator: a phash write changes it
+	// without touching image membership.
+	phashMissing atomic.Pointer[int]
 }
 
 var (
@@ -114,6 +123,46 @@ func AutoUntaggedVisibleCount(database *db.DB) (int, bool) {
 		         SELECT 1 FROM image_tags it
 		         WHERE it.image_id = i.id AND it.is_auto = 1
 		       )`)
+}
+
+// InboxCount returns the cached count of visible images sitting in the
+// inbox. Surfaced in the gallery toolbar's inbox toggle so the operator
+// sees the triage backlog at a glance; reads off idx_images_inbox_visible.
+func InboxCount(database *db.DB) (int, bool) {
+	c := forDB(database)
+	return c.cachedCount(&c.inboxCount, `SELECT COUNT(*) FROM images WHERE is_missing = 0 AND is_inbox = 1`)
+}
+
+// TagCount returns the cached count of non-alias tags. Surfaced in the
+// Settings galleries table and the layout footer, so uncached it runs once
+// per render per gallery.
+func TagCount(database *db.DB) (int, bool) {
+	c := forDB(database)
+	return c.cachedCount(&c.tagCount, `SELECT COUNT(*) FROM tags WHERE is_alias = 0`)
+}
+
+// CollectionsCount returns the cached count of distinct collection labels
+// across non-missing images, surfaced in the layout footer. Reads the
+// trigger-maintained per-label counts, so the re-pay after a drop is one
+// row per label.
+func CollectionsCount(database *db.DB) (int, bool) {
+	c := forDB(database)
+	return c.cachedCount(&c.collectionsCount, `SELECT COUNT(*) FROM collection_counts WHERE visible_count > 0`)
+}
+
+// PhashMissing returns the cached count of visible rows carrying no phash.
+// The relations hub renders it on every hit and the partial index excludes
+// NULLs, so the underlying SELECT walks every visible row.
+func PhashMissing(database *db.DB) (int, bool) {
+	c := forDB(database)
+	return c.cachedCount(&c.phashMissing, `SELECT COUNT(*) FROM images WHERE phash IS NULL AND is_missing = 0`)
+}
+
+// InvalidatePhashMissing drops only the phash tally. Call after a write
+// that changes the NULL/non-NULL count without touching membership:
+// single-image recompute, the backfill, rebuild-thumbnails completion.
+func InvalidatePhashMissing(database *db.DB) {
+	forDB(database).phashMissing.Store(nil)
 }
 
 // CountedTags holds every image's counted-tag total - its non-meta
@@ -204,4 +253,8 @@ func Invalidate(database *db.DB) {
 	c.autoUntaggedVisible.Store(nil)
 	c.visibleCount.Store(nil)
 	c.countedTags.Store(nil)
+	c.inboxCount.Store(nil)
+	c.tagCount.Store(nil)
+	c.collectionsCount.Store(nil)
+	c.phashMissing.Store(nil)
 }

@@ -97,7 +97,6 @@ func OpenManga(path string) (*Manga, error) {
 	return &Manga{Pages: pages, zr: zr, byPath: byPath}, nil
 }
 
-// Close releases the archive file handle.
 func (m *Manga) Close() error {
 	if m == nil || m.zr == nil {
 		return nil

@@ -307,7 +307,7 @@ func implicationReachesTx(tx *sql.Tx, start, target int64) (bool, error) {
 // the propagation job) get the same is_implied=1 rows the tags-service
 // write path produces. The is_auto value is the parent's; implied rows
 // inherit it so the detail-page source grouping keeps tracking origin.
-// ratingCatID, if non-zero, gates a pruneLowerRatingsTx pass after the
+// ratingCatID, if non-zero, gates a PruneLowerRatingsTx pass after the
 // fan-out so an implication whose implied side is a rating tag doesn't
 // leave the image with multiple rating rows.
 func ApplyImpliedFanoutTx(tx *sql.Tx, imageID, parentID, ratingCatID int64, isAuto bool) error {
@@ -322,7 +322,7 @@ func ApplyImpliedFanoutTx(tx *sql.Tx, imageID, parentID, ratingCatID int64, isAu
 // service's addTagToImageTxReportingDup and the public ApplyImpliedFanoutTx
 // entrypoint. Kept private so the fan-out logic lives in one place.
 func fanOutImpliedTxImpl(tx *sql.Tx, imageID, parentID, ratingCatID int64, isAutoInt int) error {
-	implied, err := transitiveImpliedTx(tx, []int64{parentID})
+	implied, err := TransitiveImpliedTx(tx, []int64{parentID})
 	if err != nil {
 		return err
 	}
@@ -362,7 +362,7 @@ func applyImpliedClosureTx(tx *sql.Tx, imageID int64, implied []int64, ratingCat
 		}
 	}
 	if insertedRating && ratingCatID != 0 {
-		if err := pruneLowerRatingsTx(tx, ratingCatID, imageID); err != nil {
+		if err := PruneLowerRatingsTx(tx, ratingCatID, imageID); err != nil {
 			return fmt.Errorf("prune lower ratings after implied fan-out: %w", err)
 		}
 	}

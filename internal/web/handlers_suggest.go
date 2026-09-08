@@ -3,8 +3,11 @@ package web
 import (
 	"cmp"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"html/template"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/monbooru/monbooru/internal/db"
@@ -173,6 +176,59 @@ func (s *Server) queryDistinctLabels(table, col, prefix string, limit int, logLa
 		 ORDER BY `+col+` LIMIT ?`, lo, hi, limit)
 }
 
+// queryTaggerLabels drives the `tagged:` / `autotagged:` autocomplete off
+// the provenance ledger's label set, which stays a handful of rows at any
+// library size - so the prefix match and the case fold run here rather
+// than as a per-keystroke scan of image_tag_sources. auto narrows to
+// labels an auto-tagger stamped on image_tags.
+func (s *Server) queryTaggerLabels(prefix string, limit int, auto bool) []string {
+	svc := s.tagSvc()
+	if svc == nil {
+		return nil
+	}
+	labels, err := svc.UsedByLabels()
+	if err != nil {
+		logx.Warnf("tagger suggest: %v", err)
+		return nil
+	}
+	if auto {
+		autoSet, err := svc.AutoTaggerLabels(labels)
+		if err != nil {
+			logx.Warnf("tagger suggest: %v", err)
+			return nil
+		}
+		labels = slices.DeleteFunc(labels, func(l string) bool {
+			_, ok := autoSet[l]
+			return !ok
+		})
+	}
+	return matchLabelPrefix(labels, prefix, limit)
+}
+
+// matchLabelPrefix keeps the labels a case-insensitive prefix selects,
+// one per spelling: the filters match NOCASE, so a ledger carrying both
+// `PTR` and `ptr` would otherwise offer two rows for one result set.
+func matchLabelPrefix(labels []string, prefix string, limit int) []string {
+	low := strings.ToLower(prefix)
+	seen := make(map[string]struct{}, len(labels))
+	out := make([]string, 0, limit)
+	for _, l := range labels {
+		folded := strings.ToLower(l)
+		if l == "" || !strings.HasPrefix(folded, low) {
+			continue
+		}
+		if _, dup := seen[folded]; dup {
+			continue
+		}
+		seen[folded] = struct{}{}
+		out = append(out, l)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
+}
+
 // querySourceLabels drives the `source:` autocomplete in the search-bar
 // `system:` level-2 dropdown and the detail / batch source dialogs.
 func (s *Server) querySourceLabels(prefix string, limit int) []string {
@@ -312,6 +368,50 @@ func (s *Server) tagSuggest(w http.ResponseWriter, r *http.Request) {
 	s.renderSuggestList(w, `data-tag-name`, `onclick="applyTagSuggest(this)"`, items)
 }
 
+// searchIDsCap bounds what one [Select all] can hand back. The walk runs in
+// the foreground over the whole match set, and past this the answer is a list
+// no batch POST could usefully carry: a million-image library's popular tag
+// is three megabytes of ids.
+var searchIDsCap = 5000
+
+// errSearchIDsFull stops the walk at the cap instead of reading the rest.
+var errSearchIDsFull = errors.New("search ids: cap reached")
+
+// searchIDs answers the ids one search matches, in the gallery's own order.
+// The inbox cluster's [Select all] is the caller: a batch that spilled past
+// the page edge has no rows on screen to tick, and the selection is a list of
+// ids rather than a query, so the list has to come from here. Capped, with
+// the answer saying so, since the handler takes any query.
+func (s *Server) searchIDs(w http.ResponseWriter, r *http.Request) {
+	expr, err := search.Parse(r.URL.Query().Get("q"))
+	if err != nil {
+		http.Error(w, "Could not parse search: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The ceiling the operator is browsing under, so this can never hand back
+	// a row the grid would not have shown them.
+	expr = resolveCeiling(r, s.active()).Apply(expr)
+	ids := []int64{}
+	err = search.ExecuteForDeleteStream(s.db(), expr, func(t search.DeleteTarget) error {
+		ids = append(ids, t.ID)
+		if len(ids) >= searchIDsCap {
+			return errSearchIDsFull
+		}
+		return nil
+	})
+	truncated := errors.Is(err, errSearchIDsFull)
+	if err != nil && !truncated {
+		logx.Errorf("search ids: %v", err)
+		http.Error(w, "Search error.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		IDs       []int64 `json:"ids"`
+		Truncated bool    `json:"truncated,omitempty"`
+	}{IDs: ids, Truncated: truncated})
+}
+
 func (s *Server) searchSuggest(w http.ResponseWriter, r *http.Request) {
 	// Pin the swap target server-side. When an auto-refresh fires concurrently
 	// with the debounced input request, htmx has been observed to resolve the
@@ -366,6 +466,11 @@ func (s *Server) searchSuggest(w http.ResponseWriter, r *http.Request) {
 				switch key {
 				case "collection", "source", "name", "prompt", "model", "sampler":
 					vp = strings.TrimPrefix(val, `"`)
+				case "tagged", "autotagged":
+					// Quoted like the keys above, but expansionRows
+					// matches the booleans that share the level
+					// case-sensitively, so the fold has to survive.
+					vp = strings.TrimPrefix(vp, `"`)
 				}
 				rows := s.systemSuggestLevel2(key, vp)
 				if len(rows) == 0 {
@@ -548,6 +653,17 @@ func (s *Server) systemSuggestLevel2(key, valPrefix string) []suggestItem {
 	if key == "source" {
 		return append(expansionRows(key, valPrefix),
 			quotedSDLabelRows("source", s.querySourceLabels(valPrefix, 10))...)
+	}
+	// tagged: / autotagged: take the booleans or a label from the
+	// provenance ledger. Ledger labels are quoted like the source:
+	// branch above; a label that repeats an expansion value (the
+	// reserved `user`) keeps the expansion row and its description.
+	if key == "tagged" || key == "autotagged" {
+		labels := s.queryTaggerLabels(valPrefix, 10, key == "autotagged")
+		labels = slices.DeleteFunc(labels, func(l string) bool {
+			return slices.Contains(searchkw.Expansions[key], strings.ToLower(l))
+		})
+		return append(expansionRows(key, valPrefix), quotedSDLabelRows(key, labels)...)
 	}
 	// name: surfaces distinct file basenames whose substring matches
 	// the prefix, mirroring the executor's `canonical_path LIKE '%/<val>%'`

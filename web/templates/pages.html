@@ -13,6 +13,9 @@
       <span class="detail-filename mono-small">{{.Filename}} ({{.PageCount}} pages{{if .LastReadPage}}, read to {{.LastReadPage}}{{end}})</span>
     </div>
   </div>
+  {{/* The sidebar's tag buttons target this slot and land their flash
+       in it; htmx drops the request outright when the slot is missing. */}}
+  {{template "partials/tag_list.html" (dict "ImageID" .Image.ID "CSRFToken" .CSRFToken)}}
   <ul class="manga-pages-grid">
     {{range $i := seq 1 .PageCount}}
     <li class="manga-page-cell{{if lt $i $.LastReadPage}} manga-page-read{{else if eq $i $.LastReadPage}} manga-page-bookmark{{end}}" id="page-{{$i}}">

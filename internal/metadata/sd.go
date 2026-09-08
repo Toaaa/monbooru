@@ -72,7 +72,7 @@ func parseA1111Parameters(text string) *models.SDMetadata {
 
 	sd.RawParams = rawParams
 	if rawParams != "" {
-		sd.ParsedParams = parseAllA1111Params(rawParams)
+		sd.ParsedParams = ParseAllSDParams(rawParams)
 	}
 	sd.GenerationHash = computeGenerationHash(
 		sd.Prompt, sd.NegativePrompt, sd.Model, sd.Sampler, sd.Steps, sd.CFGScale,
@@ -95,14 +95,9 @@ func findParamLineIndex(text string) int {
 	return -1
 }
 
-// ParseAllSDParams is the exported version for use in web handlers.
-func ParseAllSDParams(rawParams string) []models.SDParam {
-	return parseAllA1111Params(rawParams)
-}
-
-// parseAllA1111Params extracts every "Key: Value" pair from an A1111
+// ParseAllSDParams extracts every "Key: Value" pair from an A1111
 // parameter line. Order is preserved; values with braces are kept whole.
-func parseAllA1111Params(paramLine string) []models.SDParam {
+func ParseAllSDParams(paramLine string) []models.SDParam {
 	var result []models.SDParam
 	seen := map[string]bool{}
 	eachA1111Param(paramLine, func(key, val string) {

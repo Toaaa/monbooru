@@ -45,8 +45,6 @@
     {{end}}
     <div class="peer-actions">
       {{if .Companion}}<button type="submit" form="monloader-urls" class="btn-sm">Save</button>{{end}}
-      {{/* A dropped folder's click persists, so it reads as the standing
-           choice it is rather than this run's state. */}}
       {{if .Installed}}
       <form hx-post="/settings/plugins/{{.Name}}/{{if .Enabled}}stop{{else}}start{{end}}" hx-target="#plugin-rows" hx-swap="outerHTML"
             {{if not .Enabled}}hx-confirm="Run {{.Command}}?" data-confirm-ok="Enable"{{end}} style="display:inline">
@@ -55,8 +53,6 @@
       </form>
       {{end}}
       {{if .Paired}}
-      {{/* Disabling a managed plugin already silences it, so only a peer
-           whose process monbooru does not own needs the pause lever. */}}
       {{if not .Installed}}
       <form hx-post="/settings/plugins/{{.Name}}/pause" hx-target="#plugin-rows" hx-swap="outerHTML" style="display:inline">
         <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -64,8 +60,6 @@
         <button type="submit" class="btn-sm">{{if .Paused}}Resume{{else}}Pause{{end}}</button>
       </form>
       {{end}}
-      {{/* A managed plugin can only be unpaired while it is running: the
-           teardown has to reach it, and the removal ends by stopping it. */}}
       {{if or (not .Installed) .Enabled}}
       <form hx-post="/settings/plugins/{{.Name}}/remove" hx-target="#plugin-rows" hx-swap="outerHTML"
             hx-confirm="Remove the {{.Name}} pairing?" data-confirm-ok="Remove"
@@ -78,7 +72,6 @@
     </div>
   </div>
   {{end}}
-  {{/* The companion row always renders, so one row means nothing installed. */}}
   {{if le (len .Rows) 1}}
   <p class="field-hint">Nothing installed. Drop a plugin folder there, or run a plugin on the LAN pointed at monbooru and approve its request above.</p>
   {{end}}

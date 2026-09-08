@@ -2,7 +2,8 @@ package api
 
 import (
 	"net/http"
-	"slices"
+
+	"github.com/monbooru/monbooru/internal/counts"
 )
 
 // galleryListEntry is one row of GET /api/v1/galleries: a configured
@@ -25,9 +26,7 @@ func (h *Handler) listGalleries(w http.ResponseWriter, r *http.Request) {
 	if active, ok := h.resolver(""); ok {
 		activeName = active.Name
 	}
-	h.cfgMu.RLock()
-	configured := slices.Clone(h.cfg.Galleries)
-	h.cfgMu.RUnlock()
+	configured := h.cfg().Galleries
 	out := make([]galleryListEntry, 0, len(configured))
 	for _, gc := range configured {
 		g, ok := h.resolver(gc.Name)
@@ -35,25 +34,9 @@ func (h *Handler) listGalleries(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		entry := galleryListEntry{Name: gc.Name, Active: gc.Name == activeName}
-		entry.Images = galleryCount(g.VisibleCount, g, `SELECT COUNT(*) FROM images WHERE is_missing = 0`)
-		entry.Tags = galleryCount(g.TagCount, g, `SELECT COUNT(*) FROM tags WHERE is_alias = 0`)
+		entry.Images, _ = counts.VisibleCount(g.DB)
+		entry.Tags, _ = counts.TagCount(g.DB)
 		out = append(out, entry)
 	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// galleryCount returns the cached count when the accessor is wired - the
-// resolver populates it from the gallery's cached aggregates so this
-// endpoint matches what the Settings page shows without a fresh scan -
-// and falls back to a direct query otherwise (e.g. a hand-built test
-// Gallery). Counts are best-effort: a failure reports 0.
-func galleryCount(cached func() (int, error), g Gallery, fallback string) int {
-	if cached != nil {
-		if n, err := cached(); err == nil {
-			return n
-		}
-	}
-	var n int
-	_ = g.DB.Read.QueryRow(fallback).Scan(&n)
-	return n
+	WriteJSON(w, http.StatusOK, out)
 }

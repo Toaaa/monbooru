@@ -13,8 +13,6 @@
   <div class="table-scroll">
   <table class="cat-table">
     <thead><tr><th>Name</th><th>Color</th><th>Actions</th></tr></thead>
-    {{/* The token rides the tbody so a row swapped in by a recolour
-         inherits it without carrying a copy. */}}
     <tbody id="cat-list" hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'>
       {{range .Categories}}
       {{template "partials/category_row.html" .}}
@@ -27,12 +25,7 @@
         class="add-cat-form">
     <input type="hidden" name="_csrf" value="{{$csrf}}">
     <input type="text" name="name" placeholder="New category" required>
-    {{/* Start the picker on a distinctive accent rather than the neutral
-         #888888 fallback so a no-change Add doesn't produce a row whose
-         hex blends into the body text. The schema and import-path
-         defaults still resolve to #888888 for missing values. */}}
     <span class="cat-color-pair">
-      {{/* Only the hex field is named: inside a form both would post. */}}
       <input type="color" id="add-cat-swatch" value="#5c6bc0" aria-label="Color for the new category">
       <input type="text" name="color" id="add-cat-hex" value="#5c6bc0" class="cat-hex mono-small"
              list="cat-palette" pattern="#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})" maxlength="7" required
@@ -41,14 +34,11 @@
     <button type="submit">Add</button>
   </form>
 
-  {{/* Most new categories want a colour the table already carries, so
-       offer them by the name wearing each one. */}}
   <datalist id="cat-palette">
     {{range .Categories}}<option value="{{.Color}}">{{.Name}}</option>{{end}}
   </datalist>
 </div>
 
-<!-- Rename category dialog -->
 <dialog id="cat-rename-dialog">
   <form id="cat-rename-form" hx-post="" hx-target="#cat-rename-error" hx-swap="innerHTML">
     <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -58,25 +48,17 @@
       <input type="text" name="name" id="cat-rename-input" required autocomplete="off">
     </div>
     <div id="cat-rename-error"></div>
-    <div class="dialog-actions">
-      <button type="submit">Rename</button>
-      <button type="button" onclick="document.getElementById('cat-rename-dialog').close()">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "cat-rename-dialog" "Submit" "Rename"}}
   </form>
 </dialog>
 
-<!-- Delete category dialog -->
 <dialog id="delete-cat-dialog">
   <p>Delete category <strong id="del-cat-name"></strong>?</p>
   <p id="del-cat-tag-info" class="field-hint"></p>
   <div id="del-cat-move-section">
     <div class="field">
       <label>Move tags to category:</label>
-      <select id="del-cat-target">
-        {{range .Categories}}
-        <option value="{{.ID}}"{{if eq .Name "rating"}} data-locked="1"{{end}}>{{.Name}}</option>
-        {{end}}
-      </select>
+      {{template "partials/category_select.html" dict "ID" "del-cat-target" "Categories" .Categories}}
     </div>
   </div>
   <div id="del-cat-flash"></div>
@@ -147,7 +129,7 @@ function openCatDeleteDialog(catId, catName) {
 
       var targetSel = document.getElementById('del-cat-target');
       Array.from(targetSel.options).forEach(function(opt) {
-        opt.disabled = (opt.value == catId) || opt.dataset.locked === '1';
+        opt.disabled = opt.value == catId;
         opt.hidden = opt.disabled;
         if (opt.disabled && targetSel.value == catId) {
           var first = Array.from(targetSel.options).find(function(o) { return !o.disabled; });

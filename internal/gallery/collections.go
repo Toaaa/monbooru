@@ -337,7 +337,7 @@ func CollectionSamples(database *db.DB, names []string, per int, excludeIDs []in
 		return out, nil
 	}
 	for _, name := range names {
-		samples, err := collectionWalk(database, name, excludeIDs, per, 0)
+		samples, err := CollectionMembers(database, name, excludeIDs, per, 0)
 		if err != nil {
 			return out, err
 		}
@@ -349,10 +349,10 @@ func CollectionSamples(database *db.DB, names []string, per int, excludeIDs []in
 	return out, nil
 }
 
-// collectionWalk reads one window of name's visible members in reading
+// CollectionMembers reads one window of name's visible members in reading
 // order, riding idx_image_collections_reading so the LIMIT stops the
 // scan early instead of sorting the whole label.
-func collectionWalk(database *db.DB, name string, excludeIDs []int64, limit, offset int) ([]CollectionSample, error) {
+func CollectionMembers(database *db.DB, name string, excludeIDs []int64, limit, offset int) ([]CollectionSample, error) {
 	exclude, args := excludeNotExists("i.id", excludeIDs)
 	args = append([]any{name}, args...)
 	args = append(args, limit, offset)
@@ -370,15 +370,6 @@ func collectionWalk(database *db.DB, name string, excludeIDs []int64, limit, off
 		 FROM image_collections c JOIN images i ON i.id = c.image_id
 		 WHERE c.name = ? AND i.is_missing = 0`+exclude+`
 		 ORDER BY c.position IS NULL, c.position, c.image_id LIMIT ? OFFSET ?`, args...)
-}
-
-// CollectionMembers returns one window of name's visible members
-// (NOCASE) in reading order (position first with NULLs last, then id),
-// skipping members above the rating ceiling (excludeIDs) like the page
-// listing. Windowed so a huge label can't force a full render in one
-// dialog body.
-func CollectionMembers(database *db.DB, name string, excludeIDs []int64, limit, offset int) ([]CollectionSample, error) {
-	return collectionWalk(database, name, excludeIDs, limit, offset)
 }
 
 // ReorderCollection rewrites name's ordering from ids: 1-based positions
@@ -495,6 +486,25 @@ func CollectionCeilingHidden(database *db.DB, name string, excludeIDs []int64) (
 	return blind - filtered, nil
 }
 
+// CollectionHiddenOrderedIDs returns the positioned members of name the
+// rating ceiling (excludeIDs) hides, in their stored reading order. The
+// click-order reorder appends them behind what the operator arranged:
+// a dialog filtered by the ceiling cannot offer those tiles, so without
+// this the clear would drop the position of every row it never showed.
+// Empty when no ceiling is active.
+func CollectionHiddenOrderedIDs(database *db.DB, name string, excludeIDs []int64) ([]int64, error) {
+	if len(excludeIDs) == 0 {
+		return nil, nil
+	}
+	placeholders, args := db.InPlaceholders(excludeIDs)
+	return db.QueryIDs(database.Read,
+		`SELECT c.image_id FROM image_collections c JOIN images i ON i.id = c.image_id
+		 WHERE c.name = ? AND c.position IS NOT NULL AND i.is_missing = 0
+		   AND EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = c.image_id AND it.tag_id IN (`+placeholders+`))
+		 ORDER BY c.position, c.image_id`,
+		append([]any{name}, args...)...)
+}
+
 // CollectionMemberIDs returns every image id filed under name (case-
 // insensitive), missing rows included, so a rename or dissolve reaches
 // the whole collection rather than only its visible members.
@@ -536,4 +546,97 @@ func CollectionCBZMembers(database *db.DB, name string) ([]CBZMember, error) {
 		return NaturalLess(strings.ToLower(unordered[i].filename), strings.ToLower(unordered[j].filename))
 	})
 	return append(out, unordered...), rows.Err()
+}
+
+// The three writes below take a chunk of image ids rather than one image,
+// because their callers are background jobs walking a whole scope 500 rows
+// at a time. Each is one transaction, and each maintains the home-mirror
+// invariant the per-image helpers above keep.
+
+// AddCollectionToImages files every id under name, leaving an image that
+// already carries the label alone. An image with no home yet takes this one.
+func AddCollectionToImages(database *db.DB, ids []int64, name string) error {
+	placeholders, args := db.InPlaceholders(ids)
+	labelArgs := append([]any{name}, args...)
+	return db.InWriteTx(database.Write, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(
+			`INSERT INTO image_collections (image_id, name, position)
+			 SELECT id, ?, NULL FROM images WHERE id IN (`+placeholders+`)
+			 ON CONFLICT(image_id, name) DO NOTHING`,
+			labelArgs...,
+		); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`UPDATE images SET series = ?, series_order = NULL
+			 WHERE series = '' AND id IN (`+placeholders+`)`,
+			labelArgs...,
+		)
+		return err
+	})
+}
+
+// RemoveCollectionFromImages drops name from every id, rebinding the home
+// mirror of the rows whose home it was to whatever membership survives.
+func RemoveCollectionFromImages(database *db.DB, ids []int64, name string) error {
+	placeholders, args := db.InPlaceholders(ids)
+	labelArgs := append([]any{name}, args...)
+	return db.InWriteTx(database.Write, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(
+			`DELETE FROM image_collections WHERE name = ? AND image_id IN (`+placeholders+`)`,
+			labelArgs...,
+		); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`UPDATE images SET
+			   series = COALESCE((SELECT name FROM image_collections c WHERE c.image_id = images.id
+			                      ORDER BY c.position IS NULL, c.position, c.name LIMIT 1), ''),
+			   series_order = (SELECT position FROM image_collections c WHERE c.image_id = images.id
+			                   ORDER BY c.position IS NULL, c.position, c.name LIMIT 1)
+			 WHERE series = ? COLLATE NOCASE AND id IN (`+placeholders+`)`,
+			labelArgs...,
+		)
+		return err
+	})
+}
+
+// RenameCollectionForImages relabels oldName to newName across the chunk,
+// shifting positions by posOffset. merging drops a membership the image
+// already holds under newName first, so the rename cannot collide; the
+// pre-existing target's position then wins the home resync.
+func RenameCollectionForImages(database *db.DB, ids []int64, oldName, newName string, posOffset int, merging bool) error {
+	placeholders, args := db.InPlaceholders(ids)
+	return db.InWriteTx(database.Write, func(tx *sql.Tx) error {
+		if merging {
+			if _, err := tx.Exec(
+				`DELETE FROM image_collections
+				 WHERE name = ? AND image_id IN (`+placeholders+`)
+				   AND image_id IN (SELECT image_id FROM image_collections WHERE name = ?)`,
+				append(append([]any{oldName}, args...), newName)...,
+			); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(
+			`UPDATE image_collections SET name = ?, position = position + ?
+			 WHERE name = ? AND image_id IN (`+placeholders+`)`,
+			append([]any{newName, posOffset, oldName}, args...)...,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`UPDATE images SET series = ? WHERE series = ? COLLATE NOCASE AND id IN (`+placeholders+`)`,
+			append([]any{newName, oldName}, args...)...,
+		); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`UPDATE images SET series_order =
+			   (SELECT position FROM image_collections WHERE image_id = images.id AND name = ?)
+			 WHERE series = ? COLLATE NOCASE AND id IN (`+placeholders+`)`,
+			append([]any{newName, newName}, args...)...,
+		)
+		return err
+	})
 }

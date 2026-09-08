@@ -202,12 +202,13 @@ func buildSpec(baseURL string) map[string]any {
 							"items": map[string]any{
 								"type": "object",
 								"properties": map[string]any{
-									"site":       map[string]any{"type": "string", "description": "Site label, e.g. \"danbooru\"; empty for a url-only origin."},
-									"post_id":    map[string]any{"type": "string", "description": "Upstream post id; omitted for a manually-added origin."},
-									"url":        map[string]any{"type": "string"},
-									"commentary": map[string]any{"type": "string", "description": "Artist commentary pulled from (or hand-entered for) this origin; omitted when empty."},
-									"original":   map[string]any{"type": "string", "description": "Upstream artist source the post declared (usually a URL, newline-joined when several); omitted when empty."},
-									"similarity": map[string]any{"type": "number", "description": "Best similarity-service score (0-100) a lookup matched this origin with; omitted for an exact or manual origin. A matched origin's refetches skip the md5 verify."},
+									"site":                  map[string]any{"type": "string", "description": "Site label, e.g. \"danbooru\"; empty for a url-only origin."},
+									"post_id":               map[string]any{"type": "string", "description": "Upstream post id; omitted for a manually-added origin."},
+									"url":                   map[string]any{"type": "string"},
+									"commentary":            map[string]any{"type": "string", "description": "Artist commentary pulled from (or hand-entered for) this origin; omitted when empty."},
+									"commentary_translated": map[string]any{"type": "string", "description": "Translation of that commentary where the source published one; omitted when empty."},
+									"original":              map[string]any{"type": "string", "description": "Upstream artist source the post declared (usually a URL, newline-joined when several); omitted when empty."},
+									"similarity":            map[string]any{"type": "number", "description": "Best similarity-service score (0-100) a lookup matched this origin with; omitted for an exact or manual origin. A matched origin's refetches skip the md5 verify."},
 								},
 							},
 						},
@@ -260,10 +261,10 @@ func buildSpec(baseURL string) map[string]any {
 								"member_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 							},
 						},
-						"version_parent":    map[string]any{"type": "integer", "nullable": true, "description": "id of the older revision; null when this image is the chain root."},
-						"version_child":     map[string]any{"type": "integer", "nullable": true, "description": "id of the newer revision; null when this image is the chain leaf."},
-						"derivative_source": map[string]any{"type": "integer", "nullable": true, "description": "id of the source image when this image is a derivative; null otherwise."},
-						"derivatives":       map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+						"version_parent":     map[string]any{"type": "integer", "nullable": true, "description": "id of the older revision; null when this image is the chain root."},
+						"version_child":      map[string]any{"type": "integer", "nullable": true, "description": "id of the newer revision; null when this image is the chain leaf."},
+						"derivative_sources": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "ids of the images this image is based on; empty when it is based on none."},
+						"derivatives":        map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 					},
 				},
 			},
@@ -281,11 +282,9 @@ func buildSpec(baseURL string) map[string]any {
 					}),
 			},
 			"/images": map[string]any{
-				"post": map[string]any{
-					"summary":     "Add an image",
-					"operationId": "createImage",
-					"parameters":  []map[string]any{galleryParam()},
-					"requestBody": map[string]any{
+				"post": opBody("Add an image", "createImage",
+					[]map[string]any{galleryParam()},
+					map[string]any{
 						"required": true,
 						"content": map[string]any{
 							"multipart/form-data": map[string]any{
@@ -293,21 +292,24 @@ func buildSpec(baseURL string) map[string]any {
 									"type":     "object",
 									"required": []string{"file"},
 									"properties": map[string]any{
-										"file":             map[string]any{"type": "string", "format": "binary", "description": "Image or video file"},
-										"tags":             map[string]any{"type": "string", "description": "JSON-encoded array of tag names"},
-										"folder":           map[string]any{"type": "string", "description": "Destination subfolder under the gallery root; missing directories are created. Leave blank for the gallery root."},
-										"autotag":          map[string]any{"type": "string", "description": "Set to \"true\" to kick off an auto-tag job on the new image"},
-										"tagger_name":      map[string]any{"type": "string", "description": "Optional auto-tagger name; when set with autotag, restricts the job to that tagger"},
-										"via":              map[string]any{"type": "string", "description": "Optional caller-supplied identifier (app name, URL...). Stored as images.origin and attached to each initial tag via image_tags.tagger_name. Blank defaults images.origin to 'upload' for multipart mode."},
-										"source":           map[string]any{"type": "string", "description": "Optional site label for the image's origin (site name, scraper...). Recorded as a source; on a duplicate-SHA push its tags and provenance merge into the existing image instead of being discarded."},
-										"url":              map[string]any{"type": "string", "description": "Optional canonical web URL the image came from. Must start with http:// or https://. Recorded on the same origin as 'source'."},
-										"md5":              map[string]any{"type": "string", "description": "Optional md5 the source claims for the file (<=64 chars). Recorded on the origin row as an audit trail; never a dedup key."},
-										"parent_url":       map[string]any{"type": "string", "description": "Optional canonical URL of the post this post declares as its parent. Must start with http:// or https://. Recorded on the same origin as 'source'; when the parent's post lands in the gallery too, the pair is linked as a derivative relation."},
-										"commentary":       map[string]any{"type": "string", "description": "Optional artist commentary for the pushed source (<=10000 chars)."},
-										"original":         map[string]any{"type": "string", "description": "Optional upstream artist source the post declared (<=2048 chars, newline-joined when several). Recorded on the same origin as 'source'."},
-										"notes":            map[string]any{"type": "string", "description": "Optional JSON-encoded array of positional note boxes ({x, y, w, h, body}; a box may carry body_html instead, the source's own HTML, converted to monbooru's markup on the way in) for the pushed source."},
-										"collection":       map[string]any{"type": "string", "description": "Optional collection label (images.series). Written on the new row; on a duplicate-SHA push added as a membership that never displaces the existing home."},
-										"collection_order": map[string]any{"type": "string", "description": "Optional 1-based position within the collection. Requires a non-empty collection in the same request."},
+										"file":                        map[string]any{"type": "string", "format": "binary", "description": "Image or video file"},
+										"tags":                        map[string]any{"type": "string", "description": "JSON-encoded array of tag names"},
+										"folder":                      map[string]any{"type": "string", "description": "Destination subfolder under the gallery root; missing directories are created. Leave blank for the gallery root."},
+										"autotag":                     map[string]any{"type": "string", "description": "Set to \"true\" to kick off an auto-tag job on the new image"},
+										"tagger_name":                 map[string]any{"type": "string", "description": "Optional auto-tagger name; when set with autotag, restricts the job to that tagger"},
+										"via":                         map[string]any{"type": "string", "description": "Optional caller-supplied identifier (app name, URL...). Stored as images.origin and attached to each initial tag via image_tags.tagger_name. Blank defaults images.origin to 'upload' for multipart mode."},
+										"source":                      map[string]any{"type": "string", "description": "Optional site label for the image's origin (site name, scraper...). Recorded as a source; on a duplicate-SHA push its tags and provenance merge into the existing image instead of being discarded."},
+										"url":                         map[string]any{"type": "string", "description": "Optional canonical web URL the image came from. Must start with http:// or https://. Recorded on the same origin as 'source'."},
+										"md5":                         map[string]any{"type": "string", "description": "Optional md5 the source claims for the file (<=64 chars). Recorded on the origin row as an audit trail; never a dedup key."},
+										"parent_url":                  map[string]any{"type": "string", "description": "Optional canonical URL of the post this post declares as its parent. Must start with http:// or https://. Recorded on the same origin as 'source'; when the parent's post lands in the gallery too, the pair is linked as a derivative relation."},
+										"commentary":                  map[string]any{"type": "string", "description": "Optional artist commentary for the pushed source (<=10000 chars)."},
+										"commentary_translated":       map[string]any{"type": "string", "description": "Optional translation of that commentary (<=10000 chars)."},
+										"commentary_dtext":            map[string]any{"type": "string", "description": "The source's own DText for that commentary, converted to monbooru's markup on the way in and preferred over the plain rendering beside it. Same idea as a note's body_html."},
+										"commentary_translated_dtext": map[string]any{"type": "string", "description": "The same for the translation."},
+										"original":                    map[string]any{"type": "string", "description": "Optional upstream artist source the post declared (<=2048 chars, newline-joined when several). Recorded on the same origin as 'source'."},
+										"notes":                       map[string]any{"type": "string", "description": "Optional JSON-encoded array of positional note boxes ({x, y, w, h, body}; a box may carry body_html instead, the source's own HTML, converted to monbooru's markup on the way in) for the pushed source."},
+										"collection":                  map[string]any{"type": "string", "description": "Optional collection label (images.series). Written on the new row; on a duplicate-SHA push added as a membership that never displaces the existing home."},
+										"collection_order":            map[string]any{"type": "string", "description": "Optional 1-based position within the collection. Requires a non-empty collection in the same request."},
 									},
 								},
 							},
@@ -316,34 +318,36 @@ func buildSpec(baseURL string) map[string]any {
 									"type":     "object",
 									"required": []string{"path"},
 									"properties": map[string]any{
-										"path":             map[string]any{"type": "string", "description": "Path to a file already on disk. Absolute paths are used verbatim; relative paths are resolved under gallery/<folder> when folder is set, otherwise under the gallery root. WARNING: absolute paths give a token holder read access to anything the monbooru process can stat."},
-										"tags":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-										"folder":           map[string]any{"type": "string", "description": "Destination subfolder for relative paths"},
-										"autotag":          map[string]any{"type": "boolean", "description": "Kick off an auto-tag job on the new image"},
-										"tagger_name":      map[string]any{"type": "string", "description": "Optional auto-tagger name"},
-										"via":              map[string]any{"type": "string", "description": "Optional caller-supplied identifier. Stored as images.origin and attached to each initial tag. Blank defaults images.origin to 'ingest' for JSON path-reference mode."},
-										"source":           map[string]any{"type": "string", "description": "Optional site label for the image's origin (site name, scraper...). Recorded as a source; on a duplicate-SHA push its tags and provenance merge into the existing image instead of being discarded."},
-										"url":              map[string]any{"type": "string", "description": "Optional canonical web URL the image came from. Must start with http:// or https://. Recorded on the same origin as 'source'."},
-										"md5":              map[string]any{"type": "string", "description": "Optional md5 the source claims for the file (<=64 chars). Recorded on the origin row as an audit trail; never a dedup key."},
-										"parent_url":       map[string]any{"type": "string", "description": "Optional canonical URL of the post this post declares as its parent. Must start with http:// or https://. Recorded on the same origin as 'source'; when the parent's post lands in the gallery too, the pair is linked as a derivative relation."},
-										"commentary":       map[string]any{"type": "string", "description": "Optional artist commentary for the pushed source (<=10000 chars)."},
-										"original":         map[string]any{"type": "string", "description": "Optional upstream artist source the post declared (<=2048 chars, newline-joined when several). Recorded on the same origin as 'source'."},
-										"notes":            map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Optional positional note boxes ({x, y, w, h, body}; a box may carry body_html instead, the source's own HTML, converted to monbooru's markup on the way in) for the pushed source."},
-										"collection":       map[string]any{"type": "string", "description": "Optional collection label (images.series). Written on the new row; on a duplicate-SHA push added as a membership that never displaces the existing home."},
-										"collection_order": map[string]any{"type": "integer", "description": "Optional 1-based position within the collection. Requires a non-empty collection in the same request."},
+										"path":                        map[string]any{"type": "string", "description": "Path to a file already on disk. Absolute paths are used verbatim; relative paths are resolved under gallery/<folder> when folder is set, otherwise under the gallery root. WARNING: absolute paths give a token holder read access to anything the monbooru process can stat."},
+										"tags":                        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+										"folder":                      map[string]any{"type": "string", "description": "Destination subfolder for relative paths"},
+										"autotag":                     map[string]any{"type": "boolean", "description": "Kick off an auto-tag job on the new image"},
+										"tagger_name":                 map[string]any{"type": "string", "description": "Optional auto-tagger name"},
+										"via":                         map[string]any{"type": "string", "description": "Optional caller-supplied identifier. Stored as images.origin and attached to each initial tag. Blank defaults images.origin to 'ingest' for JSON path-reference mode."},
+										"source":                      map[string]any{"type": "string", "description": "Optional site label for the image's origin (site name, scraper...). Recorded as a source; on a duplicate-SHA push its tags and provenance merge into the existing image instead of being discarded."},
+										"url":                         map[string]any{"type": "string", "description": "Optional canonical web URL the image came from. Must start with http:// or https://. Recorded on the same origin as 'source'."},
+										"md5":                         map[string]any{"type": "string", "description": "Optional md5 the source claims for the file (<=64 chars). Recorded on the origin row as an audit trail; never a dedup key."},
+										"parent_url":                  map[string]any{"type": "string", "description": "Optional canonical URL of the post this post declares as its parent. Must start with http:// or https://. Recorded on the same origin as 'source'; when the parent's post lands in the gallery too, the pair is linked as a derivative relation."},
+										"commentary":                  map[string]any{"type": "string", "description": "Optional artist commentary for the pushed source (<=10000 chars)."},
+										"commentary_translated":       map[string]any{"type": "string", "description": "Optional translation of that commentary (<=10000 chars)."},
+										"commentary_dtext":            map[string]any{"type": "string", "description": "The source's own DText for that commentary, converted to monbooru's markup on the way in and preferred over the plain rendering beside it. Same idea as a note's body_html."},
+										"commentary_translated_dtext": map[string]any{"type": "string", "description": "The same for the translation."},
+										"original":                    map[string]any{"type": "string", "description": "Optional upstream artist source the post declared (<=2048 chars, newline-joined when several). Recorded on the same origin as 'source'."},
+										"notes":                       map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Optional positional note boxes ({x, y, w, h, body}; a box may carry body_html instead, the source's own HTML, converted to monbooru's markup on the way in) for the pushed source."},
+										"collection":                  map[string]any{"type": "string", "description": "Optional collection label (images.series). Written on the new row; on a duplicate-SHA push added as a membership that never displaces the existing home."},
+										"collection_order":            map[string]any{"type": "integer", "description": "Optional 1-based position within the collection. Requires a non-empty collection in the same request."},
 									},
 								},
 							},
 						},
 					},
-					"responses": map[string]any{
+					map[string]any{
 						"200": resp("Duplicate SHA-256: existing image returned with the pushed tags and provenance merged; alias_added is true only when a JSON path-reference recorded a new alias", "#/components/schemas/DuplicateImageResponse"),
 						"201": resp("Image created", "#/components/schemas/CreateImageResponse"),
 						"400": resp("Invalid request or unsupported file type", "#/components/schemas/Error"),
 						"413": resp("File exceeds max size", "#/components/schemas/Error"),
 						"500": resp("Ingest failure", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/images/search": map[string]any{
 				"get": map[string]any{
@@ -370,11 +374,9 @@ func buildSpec(baseURL string) map[string]any {
 						"200": resp("Image metadata", "#/components/schemas/Image"),
 						"404": resp("Not found", "#/components/schemas/Error"),
 					}),
-				"patch": map[string]any{
-					"summary":     "Edit image fields",
-					"operationId": "patchImage",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"patch": opBody("Edit image fields", "patchImage",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":        "object",
 						"description": "Any subset of the editable fields. An absent or null field is left unchanged; an empty string clears a text field. Clearing collection also clears collection_order unless one is supplied in the same request; to clear collection_order on its own, clear the collection.",
 						"properties": map[string]any{
@@ -388,13 +390,12 @@ func buildSpec(baseURL string) map[string]any {
 							"scheduled_lookup_ptr": map[string]any{"type": "boolean", "description": "The same opt-in for the nightly PTR lookup. Setting it true resets that backend's ladder."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"200": resp("Updated image", "#/components/schemas/Image"),
 						"400": resp("Invalid request (bad url, order without a collection, or no editable fields supplied)", "#/components/schemas/Error"),
 						"404": resp("Not found", "#/components/schemas/Error"),
 						"409": resp("Relabel collides with another origin the image already carries", "#/components/schemas/Error"),
-					},
-				},
+					}),
 				"delete": map[string]any{
 					"summary":     "Delete image from library",
 					"operationId": "deleteImage",
@@ -415,25 +416,28 @@ func buildSpec(baseURL string) map[string]any {
 				"post": map[string]any{
 					"summary":     "Apply fetched metadata to an existing image",
 					"operationId": "enrichImage",
-					"description": "Metadata-only counterpart of a duplicate push, used by monloader's source refetch. Shares the duplicate-push merge semantics: the origin upserts, the source's own tag slice reconciles to the pushed set, and empty url / md5 / commentary / original / notes leave the stored values be.",
+					"description": "Metadata-only counterpart of a duplicate push, used by monloader's source refetch. Shares the duplicate-push merge semantics: the origin upserts, the source's own tag slice reconciles to the pushed set, and empty url / md5 / commentary / commentary_translated / original / notes leave the stored values be.",
 					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
 					"requestBody": jsonBodySchema(true, map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-							"source":      map[string]any{"type": "string", "description": "Site label of the origin being refetched"},
-							"url":         map[string]any{"type": "string"},
-							"source_md5":  map[string]any{"type": "string", "description": "md5 the source claims (<=64 chars). Compared against the stored file when verify is set; recorded on the origin row."},
-							"parent_url":  map[string]any{"type": "string", "description": "Canonical URL of the post this post declares as its parent. Recorded on the origin row; when both sides are in the gallery the pair is linked as a derivative relation. Empty keeps the stored value."},
-							"post_width":  map[string]any{"type": "integer", "description": "What the post says the file it serves is. Recorded on the origin row and rendered beside the origin; drives upgrade:bigger. 0 or absent keeps the stored value."},
-							"post_height": map[string]any{"type": "integer"},
-							"post_size":   map[string]any{"type": "integer", "description": "Byte size the post declares. Used for the gain test when the post publishes no dimensions."},
-							"post_ext":    map[string]any{"type": "string", "description": "File extension the post serves, no dot."},
-							"verify":      map[string]any{"type": "boolean", "description": "When true and source_md5 is non-empty, the stored file is hashed and compared first; a mismatch applies nothing and returns 409 - unless the origin is similarity-matched, whose file differs by design."},
-							"similarity":  map[string]any{"type": "number", "description": "Similarity-service score (0-100) when the post was found by image similarity rather than an exact hash. Recorded on the origin row; a matched origin's refetches skip the md5 verify. 0 or absent keeps the stored score."},
-							"commentary":  map[string]any{"type": "string"},
-							"original":    map[string]any{"type": "string", "description": "Upstream artist source the post declared (<=2048 chars, newline-joined when several). A non-empty value overwrites the stored one."},
-							"notes":       map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Positional note boxes ({x, y, w, h, body}; a box may carry body_html instead, the source's own HTML, converted to monbooru's markup on the way in); a non-empty array replaces the set this origin contributed."},
+							"tags":                        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+							"source":                      map[string]any{"type": "string", "description": "Site label of the origin being refetched"},
+							"url":                         map[string]any{"type": "string"},
+							"source_md5":                  map[string]any{"type": "string", "description": "md5 the source claims (<=64 chars). Compared against the stored file when verify is set; recorded on the origin row."},
+							"parent_url":                  map[string]any{"type": "string", "description": "Canonical URL of the post this post declares as its parent. Recorded on the origin row; when both sides are in the gallery the pair is linked as a derivative relation. Empty keeps the stored value."},
+							"post_width":                  map[string]any{"type": "integer", "description": "What the post says the file it serves is. Recorded on the origin row and rendered beside the origin; drives upgrade:bigger. 0 or absent keeps the stored value."},
+							"post_height":                 map[string]any{"type": "integer"},
+							"post_size":                   map[string]any{"type": "integer", "description": "Byte size the post declares. Used for the gain test when the post publishes no dimensions."},
+							"post_ext":                    map[string]any{"type": "string", "description": "File extension the post serves, no dot."},
+							"verify":                      map[string]any{"type": "boolean", "description": "When true and source_md5 is non-empty, the stored file is hashed and compared first; a mismatch applies nothing and returns 409 - unless the origin is similarity-matched, whose file differs by design."},
+							"similarity":                  map[string]any{"type": "number", "description": "Similarity-service score (0-100) when the post was found by image similarity rather than an exact hash. Recorded on the origin row; a matched origin's refetches skip the md5 verify. 0 or absent keeps the stored score."},
+							"commentary":                  map[string]any{"type": "string"},
+							"commentary_translated":       map[string]any{"type": "string", "description": "Translation of the commentary. A non-empty value overwrites the stored one."},
+							"commentary_dtext":            map[string]any{"type": "string", "description": "The source's own DText for that commentary, converted to monbooru's markup on the way in and preferred over the plain rendering beside it. Same idea as a note's body_html."},
+							"commentary_translated_dtext": map[string]any{"type": "string", "description": "The same for the translation."},
+							"original":                    map[string]any{"type": "string", "description": "Upstream artist source the post declared (<=2048 chars, newline-joined when several). A non-empty value overwrites the stored one."},
+							"notes":                       map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Positional note boxes ({x, y, w, h, body}; a box may carry body_html instead, the source's own HTML, converted to monbooru's markup on the way in); a non-empty array replaces the set this origin contributed."},
 						},
 					}),
 					"responses": map[string]any{
@@ -471,11 +475,9 @@ func buildSpec(baseURL string) map[string]any {
 						"200": resp("Image tag list", "#/components/schemas/TagArray"),
 						"404": resp("Not found", "#/components/schemas/Error"),
 					}),
-				"post": map[string]any{
-					"summary":     "Add tags to image",
-					"operationId": "addImageTags",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"post": opBody("Add tags to image", "addImageTags",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"tags"},
 						"properties": map[string]any{
@@ -490,7 +492,7 @@ func buildSpec(baseURL string) map[string]any {
 							},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"200": map[string]any{
 							"description": "Bare TagArray on success; wrapped in {tags, tag_warnings} when any tag failed validation.",
 							"content": map[string]any{
@@ -510,13 +512,10 @@ func buildSpec(baseURL string) map[string]any {
 								},
 							},
 						},
-					},
-				},
-				"delete": map[string]any{
-					"summary":     "Remove tags from image",
-					"operationId": "removeImageTags",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+					}),
+				"delete": opBody("Remove tags from image", "removeImageTags",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"tags"},
 						"properties": map[string]any{
@@ -527,13 +526,12 @@ func buildSpec(baseURL string) map[string]any {
 							},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"200": resp("Updated tag list", "#/components/schemas/TagArray"),
 						"400": resp("Empty `tags`", "#/components/schemas/Error"),
 						"404": resp("Not found", "#/components/schemas/Error"),
 						"409": resp("conflict for a name matching more than one tag on the image; tag_implied when another tag on the image implies the one being removed", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/images/{id}/file": map[string]any{
 				"get": op("Download original image/video bytes", "getImageFile",
@@ -555,16 +553,17 @@ func buildSpec(baseURL string) map[string]any {
 									"type":     "object",
 									"required": []string{"file"},
 									"properties": map[string]any{
-										"file":       map[string]any{"type": "string", "format": "binary"},
-										"tags":       map[string]any{"type": "string", "description": "JSON array of tag names, merged like an enrich"},
-										"source":     map[string]any{"type": "string"},
-										"post_id":    map[string]any{"type": "string"},
-										"url":        map[string]any{"type": "string"},
-										"md5":        map[string]any{"type": "string", "description": "md5 the source claims; recorded on the origin row"},
-										"parent_url": map[string]any{"type": "string"},
-										"commentary": map[string]any{"type": "string"},
-										"original":   map[string]any{"type": "string"},
-										"notes":      map[string]any{"type": "string", "description": "JSON array of positional note boxes"},
+										"file":                  map[string]any{"type": "string", "format": "binary"},
+										"tags":                  map[string]any{"type": "string", "description": "JSON array of tag names, merged like an enrich"},
+										"source":                map[string]any{"type": "string"},
+										"post_id":               map[string]any{"type": "string"},
+										"url":                   map[string]any{"type": "string"},
+										"md5":                   map[string]any{"type": "string", "description": "md5 the source claims; recorded on the origin row"},
+										"parent_url":            map[string]any{"type": "string"},
+										"commentary":            map[string]any{"type": "string"},
+										"commentary_translated": map[string]any{"type": "string"},
+										"original":              map[string]any{"type": "string"},
+										"notes":                 map[string]any{"type": "string", "description": "JSON array of positional note boxes"},
 									},
 								},
 							},
@@ -612,11 +611,9 @@ func buildSpec(baseURL string) map[string]any {
 					}),
 			},
 			"/relations": map[string]any{
-				"post": map[string]any{
-					"summary":     "Declare a relation",
-					"operationId": "addRelation",
-					"parameters":  []map[string]any{galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"post": opBody("Declare a relation", "addRelation",
+					[]map[string]any{galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"type", "a", "b"},
 						"properties": map[string]any{
@@ -626,17 +623,14 @@ func buildSpec(baseURL string) map[string]any {
 							"direction": map[string]any{"type": "string", "description": "Optional `ba` swaps left/right; default `ab` treats `a` as the parent/source side."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"201": map[string]any{"description": "Relation created"},
 						"400": resp("Invalid request (self-relation, unknown type, missing ids)", "#/components/schemas/Error"),
 						"409": resp("Pair carries a conflicting relation already; remove it first.", "#/components/schemas/Error"),
-					},
-				},
-				"delete": map[string]any{
-					"summary":     "Remove a declared relation",
-					"operationId": "removeRelation",
-					"parameters":  []map[string]any{galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+					}),
+				"delete": opBody("Remove a declared relation", "removeRelation",
+					[]map[string]any{galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"type"},
 						"properties": map[string]any{
@@ -648,11 +642,10 @@ func buildSpec(baseURL string) map[string]any {
 							"root_id":  map[string]any{"type": "integer", "description": "Required for dissolve_version / dissolve_derivative; any chain or tree member id (the walker locates the root)."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"204": map[string]any{"description": "Removed (idempotent)"},
 						"400": resp("Invalid request", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/tags": map[string]any{
 				"get": map[string]any{
@@ -673,11 +666,9 @@ func buildSpec(baseURL string) map[string]any {
 						"200": resp("Paginated tag list", "#/components/schemas/PaginatedTags"),
 					},
 				},
-				"post": map[string]any{
-					"summary":     "Create a tag (get-or-create)",
-					"operationId": "createTag",
-					"parameters":  []map[string]any{galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"post": opBody("Create a tag (get-or-create)", "createTag",
+					[]map[string]any{galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"name"},
 						"properties": map[string]any{
@@ -685,31 +676,27 @@ func buildSpec(baseURL string) map[string]any {
 							"category": map[string]any{"type": "string", "description": "Category name; defaults to general."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"201": resp("The tag (created, or the existing row when the name already exists in the category)", "#/components/schemas/TagRow"),
 						"400": resp("Missing name, unknown category, or invalid tag name", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/tags/{id}": map[string]any{
-				"patch": map[string]any{
-					"summary":     "Rename a tag and/or move it to another category",
-					"operationId": "patchTag",
-					"parameters":  []map[string]any{pathParam("id", "Tag ID"), galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"patch": opBody("Rename a tag and/or move it to another category", "patchTag",
+					[]map[string]any{pathParam("id", "Tag ID"), galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"name":     map[string]any{"type": "string", "description": "New name."},
 							"category": map[string]any{"type": "string", "description": "Move to this category by name."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"200": resp("Updated tag", "#/components/schemas/TagRow"),
 						"400": resp("No fields supplied, or a rating-tag edit", "#/components/schemas/Error"),
 						"404": resp("Tag not found", "#/components/schemas/Error"),
 						"409": resp("A tag with the new name already exists in the target category", "#/components/schemas/Error"),
-					},
-				},
+					}),
 				"delete": op("Delete a tag", "deleteTag",
 					[]map[string]any{pathParam("id", "Tag ID"), galleryParam()},
 					map[string]any{
@@ -718,11 +705,9 @@ func buildSpec(baseURL string) map[string]any {
 					}),
 			},
 			"/tags/aliases": map[string]any{
-				"post": map[string]any{
-					"summary":     "Create an alias",
-					"operationId": "createAlias",
-					"parameters":  []map[string]any{galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"post": opBody("Create an alias", "createAlias",
+					[]map[string]any{galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"name", "canonical_id"},
 						"properties": map[string]any{
@@ -731,20 +716,17 @@ func buildSpec(baseURL string) map[string]any {
 							"canonical_id": map[string]any{"type": "integer", "description": "The tag this alias resolves to."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"201": resp("The alias row", "#/components/schemas/TagRow"),
 						"400": resp("Missing fields or an invalid alias target", "#/components/schemas/Error"),
 						"404": resp("Canonical tag not found", "#/components/schemas/Error"),
 						"409": resp("The name already names a tag with image_tags rows; merge it instead", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/tags/merge": map[string]any{
-				"post": map[string]any{
-					"summary":     "Merge one tag into another",
-					"operationId": "mergeTags",
-					"parameters":  []map[string]any{galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"post": opBody("Merge one tag into another", "mergeTags",
+					[]map[string]any{galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"alias_id", "canonical_id"},
 						"properties": map[string]any{
@@ -752,11 +734,10 @@ func buildSpec(baseURL string) map[string]any {
 							"canonical_id": map[string]any{"type": "integer", "description": "Surviving tag."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"200": resp("The canonical tag", "#/components/schemas/TagRow"),
 						"400": resp("Self-merge, missing ids, or a merge into an alias", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/tags/{id}/implications": map[string]any{
 				"get": op("List a tag's implications", "listImplications",
@@ -804,11 +785,9 @@ func buildSpec(baseURL string) map[string]any {
 					map[string]any{
 						"200": map[string]any{"description": "Categories", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/components/schemas/Category"}}}}},
 					}),
-				"post": map[string]any{
-					"summary":     "Create a category",
-					"operationId": "createCategory",
-					"parameters":  []map[string]any{galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"post": opBody("Create a category", "createCategory",
+					[]map[string]any{galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type":     "object",
 						"required": []string{"name"},
 						"properties": map[string]any{
@@ -816,49 +795,42 @@ func buildSpec(baseURL string) map[string]any {
 							"color": map[string]any{"type": "string", "description": "#rgb or #rrggbb; defaults to #888888 when blank."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"201": resp("Created category", "#/components/schemas/Category"),
 						"400": resp("Invalid or reserved name, or invalid colour", "#/components/schemas/Error"),
 						"409": resp("A category with this name already exists", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/categories/{id}": map[string]any{
-				"patch": map[string]any{
-					"summary":     "Rename and/or recolor a category",
-					"operationId": "patchCategory",
-					"parameters":  []map[string]any{pathParam("id", "Category ID"), galleryParam()},
-					"requestBody": jsonBodySchema(true, map[string]any{
+				"patch": opBody("Rename and/or recolor a category", "patchCategory",
+					[]map[string]any{pathParam("id", "Category ID"), galleryParam()},
+					jsonBodySchema(true, map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"name":  map[string]any{"type": "string", "description": "New name. Built-in categories refuse a rename."},
 							"color": map[string]any{"type": "string", "description": "#rgb or #rrggbb. Allowed on built-in categories."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"200": resp("Updated category", "#/components/schemas/Category"),
 						"400": resp("No fields, invalid colour, reserved/invalid name, or a built-in rename", "#/components/schemas/Error"),
 						"404": resp("Category not found", "#/components/schemas/Error"),
 						"409": resp("A category with the new name already exists", "#/components/schemas/Error"),
-					},
-				},
-				"delete": map[string]any{
-					"summary":     "Delete a category",
-					"operationId": "deleteCategory",
-					"parameters":  []map[string]any{pathParam("id", "Category ID"), galleryParam()},
-					"requestBody": jsonBodySchema(false, map[string]any{
+					}),
+				"delete": opBody("Delete a category", "deleteCategory",
+					[]map[string]any{pathParam("id", "Category ID"), galleryParam()},
+					jsonBodySchema(false, map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"action":    map[string]any{"type": "string", "description": "'move' (default; reparent the category's tags) or 'delete_all' (drop the tags too)."},
 							"target_id": map[string]any{"type": "integer", "description": "Move target category id; defaults to general when omitted."},
 						},
 					}),
-					"responses": map[string]any{
+					map[string]any{
 						"204": map[string]any{"description": "Deleted"},
 						"400": resp("Built-in category, an unknown action, or an unusable move target", "#/components/schemas/Error"),
 						"404": resp("Category not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/galleries": map[string]any{
 				"get": op("List configured galleries", "listGalleries",
@@ -875,6 +847,13 @@ func buildSpec(baseURL string) map[string]any {
 // same four fields in the same order; spelling them out 33 times is how a
 // mis-keyed one hides. Operations carrying a requestBody keep their
 // literal, since the body is the bulk of those.
+// opBody is op for an operation that carries a request body.
+func opBody(summary, id string, params []map[string]any, body, responses map[string]any) map[string]any {
+	m := op(summary, id, params, responses)
+	m["requestBody"] = body
+	return m
+}
+
 func op(summary, id string, params []map[string]any, responses map[string]any) map[string]any {
 	m := map[string]any{"summary": summary, "operationId": id, "responses": responses}
 	if len(params) > 0 {
@@ -936,14 +915,6 @@ func queryParam(name, desc string) map[string]any {
 	}
 }
 
-// baseURL reads the configured base under the web layer's config lock,
-// the way every other reader of that field does.
-func (h *Handler) baseURL() string {
-	h.cfgMu.RLock()
-	defer h.cfgMu.RUnlock()
-	return h.cfg.Server.BaseURL
-}
-
 // galleryParam is the shared ?gallery=<name> selector. Omitted means
 // the active gallery.
 func galleryParam() map[string]any {
@@ -952,7 +923,12 @@ func galleryParam() map[string]any {
 
 // openAPIJSON serves the raw OpenAPI JSON spec.
 func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
-	spec := buildSpec(h.baseURL())
+	cfg := h.cfg()
+	if !SetCORS(w, r, cfg) {
+		apiError(w, http.StatusForbidden, "forbidden", "CORS: origin not allowed")
+		return
+	}
+	spec := buildSpec(cfg.Server.BaseURL)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(spec)
 }
@@ -961,10 +937,14 @@ func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
 // OpenAPI spec served at /api/v1/openapi.json. No external assets are
 // loaded at runtime, so the page works offline.
 func (h *Handler) openAPIDocs(w http.ResponseWriter, r *http.Request) {
-	view := extractDocsView(buildSpec(h.baseURL()))
-	h.cfgMu.RLock()
-	view.APIEnabled = len(h.cfg.Auth.Tokens) > 0
-	h.cfgMu.RUnlock()
+	cfg := h.cfg()
+	if !SetCORS(w, r, cfg) {
+		apiError(w, http.StatusForbidden, "forbidden", "CORS: origin not allowed")
+		return
+	}
+	view := extractDocsView(buildSpec(cfg.Server.BaseURL))
+	view.APIEnabled = len(cfg.Auth.Tokens) > 0
+	view.CORSOrigins = cfg.Server.CORSOrigins
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := docsTemplate.Execute(w, view); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
@@ -972,12 +952,13 @@ func (h *Handler) openAPIDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 type docsView struct {
-	Title      string
-	Version    string
-	BaseURL    string
-	APIEnabled bool
-	Endpoints  []endpointView
-	Schemas    []schemaView
+	Title       string
+	Version     string
+	BaseURL     string
+	APIEnabled  bool
+	CORSOrigins []string
+	Endpoints   []endpointView
+	Schemas     []schemaView
 }
 
 type endpointView struct {
@@ -1215,6 +1196,7 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
  {{end}}
  <p>Every endpoint except <code>/docs</code> and <code>/openapi.json</code> requires <code>Authorization: Bearer &lt;token&gt;</code>. Create a named token in Settings → Authentication; while none exists every authenticated endpoint returns <code>503 api_disabled</code>. Tokens are scoped (read/write/delete); a request whose token lacks the scope gets <code>403 insufficient_scope</code>.</p>
  <p>Endpoints take an optional <code>?gallery=&lt;name&gt;</code> (or <code>X-Monbooru-Gallery</code> header) to target a specific gallery; omit both for the active one.</p>
+ <p>From a browser, the address you reached this page on can call the API. {{if .CORSOrigins}}So can: {{range $i, $o := .CORSOrigins}}{{if $i}}, {{end}}<code>{{$o}}</code>{{end}}.{{else}}Add others to <code>server.cors_origins</code> in <code>monbooru.toml</code>.{{end}}</p>
  <p class="muted">Raw spec: <a href="/api/v1/openapi.json">openapi.json</a></p>
 
  <h2>Endpoints</h2>

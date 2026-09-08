@@ -1,6 +1,8 @@
 package metadata
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -18,8 +20,8 @@ var errNotPNG = errors.New("not a PNG file")
 // could try to allocate up to ~4 GiB.
 const maxChunkBytes = 16 * 1024 * 1024
 
-// readPNGTextChunks returns every tEXt and iTXt chunk from a PNG reader
-// as keyword -> text.
+// readPNGTextChunks returns every tEXt, zTXt and iTXt chunk from a PNG
+// reader as keyword -> text.
 func readPNGTextChunks(r io.Reader) (map[string]string, error) {
 	sig := make([]byte, 8)
 	if _, err := io.ReadFull(r, sig); err != nil {
@@ -71,8 +73,20 @@ func readPNGTextChunks(r io.Reader) (map[string]string, error) {
 			}
 			result[string(data[:null])] = string(data[null+1:])
 
+		case "zTXt":
+			// keyword \x00 cmethod text, the text always compressed
+			null := strings.IndexByte(string(data), 0)
+			if null < 0 || len(data) < null+2 {
+				continue
+			}
+			text, err := inflateText(data[null+2:], data[null+1])
+			if err != nil {
+				continue
+			}
+			result[string(data[:null])] = string(text)
+
 		case "iTXt":
-			// keyword \x00 cflag \x00 cmethod \x00 lang \x00 tkeyword \x00 text
+			// keyword \x00 cflag cmethod lang \x00 tkeyword \x00 text
 			null1 := strings.IndexByte(string(data), 0)
 			if null1 < 0 {
 				continue
@@ -82,7 +96,8 @@ func readPNGTextChunks(r io.Reader) (map[string]string, error) {
 			if len(rest) < 2 {
 				continue
 			}
-			rest = rest[2:] // cflag + cmethod
+			compressed, method := rest[0] == 1, rest[1]
+			rest = rest[2:]
 			null2 := strings.IndexByte(string(rest), 0)
 			if null2 < 0 {
 				continue
@@ -92,7 +107,15 @@ func readPNGTextChunks(r io.Reader) (map[string]string, error) {
 			if null3 < 0 {
 				continue
 			}
-			result[key] = string(rest[null3+1:])
+			text := rest[null3+1:]
+			if compressed {
+				inflated, err := inflateText(text, method)
+				if err != nil {
+					continue
+				}
+				text = inflated
+			}
+			result[key] = string(text)
 		}
 
 		if chunkType == "IEND" {
@@ -101,6 +124,21 @@ func readPNGTextChunks(r io.Reader) (map[string]string, error) {
 	}
 
 	return result, nil
+}
+
+// inflateText decompresses an iTXt payload. Method 0 (zlib) is the only one
+// the PNG spec defines, and a stream that will not inflate is not text: the
+// caller drops the chunk rather than storing the raw bytes as a value.
+func inflateText(b []byte, method byte) ([]byte, error) {
+	if method != 0 {
+		return nil, errors.New("unknown iTXt compression method")
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = zr.Close() }()
+	return io.ReadAll(io.LimitReader(zr, maxChunkBytes))
 }
 
 // extractFromPNG reads SD and ComfyUI metadata from a PNG file.

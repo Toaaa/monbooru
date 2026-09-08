@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS image_sources (
     url        TEXT    NOT NULL DEFAULT '',
     md5        TEXT    NOT NULL DEFAULT '', -- md5 the source last claimed on a push/enrich; audit trail, never a dedup key
     commentary TEXT    NOT NULL DEFAULT '', -- artist commentary from this source; operator-editable, overwritten by a re-pull
+    commentary_translated TEXT NOT NULL DEFAULT '', -- translation of that commentary where the source carries one; same rules
     original   TEXT    NOT NULL DEFAULT '', -- upstream artist source the booru post declared (usually a URL, newline-joined when several); operator-editable, overwritten by a re-pull
     similarity REAL    NOT NULL DEFAULT 0,  -- best similarity-service score (0-100) a lookup matched this origin with; 0 = exact or manual. A matched origin's file differs by design, so refetches skip the md5 verify
     md5_match  TEXT    NOT NULL DEFAULT '', -- claimed-md5 vs local-file verdict: '' unknown, 'match', 'differ'. Maintained by the trg_*_verdict triggers off the two stored digests; gates the [upgrade] action
@@ -307,13 +308,14 @@ CREATE TABLE IF NOT EXISTS version_edges (
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
--- Directed derivative edge. derivative_image_id is PK (a derivative has
--- exactly one source); source_image_id is unconstrained so a source can
--- carry many derivatives (tree).
+-- Directed derivative edge, one row per (derivative, source) pair. A
+-- composite is made from several images, so a derivative can name any
+-- number of sources and a source can carry any number of derivatives.
 CREATE TABLE IF NOT EXISTS derivative_edges (
-    derivative_image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
-    source_image_id     INTEGER NOT NULL    REFERENCES images(id) ON DELETE CASCADE,
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    derivative_image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    source_image_id     INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (derivative_image_id, source_image_id)
 );
 
 -- Canonicalised "not related" pair (a < b). Recorded so a rejected pair

@@ -30,9 +30,7 @@ type SessionStore struct {
 }
 
 // NewSessionStore creates an empty session store.
-func NewSessionStore() *SessionStore {
-	return &SessionStore{sessions: map[string]Session{}}
-}
+func NewSessionStore() *SessionStore { return &SessionStore{sessions: map[string]Session{}} }
 
 // NewSession creates a new session and returns its ID.
 func (s *SessionStore) NewSession(lifetimeDays int) (string, error) {
@@ -103,9 +101,9 @@ func sessionFromContext(ctx context.Context) string {
 	return v
 }
 
-// SessionMiddleware validates the session cookie and redirects to /login if absent.
+// sessionMiddleware validates the session cookie and redirects to /login if absent.
 // When authEnabled is false, it passes through with a synthetic session ID.
-func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
+func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// API routes bypass session middleware (they use bearer token auth)
 		if strings.HasPrefix(r.URL.Path, "/api/v1/") {
@@ -147,24 +145,23 @@ func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
 }
 
 // isPublicPath lists the routes a browser reaches before it holds a
-// session. The operator assets are on it because the login page and the
+// session. The theme's files are on it because the login page and the
 // first-run wizard render them too, and gated they resolve to the login
 // HTML - a stylesheet that never applies and a favicon that never draws.
+// The health probe is on it for the same reason the setup gate exempts
+// it: the single-instance check and the container healthcheck both read
+// its body, and a login redirect reads to them as a foreign process.
 func isPublicPath(path string) bool {
 	switch path {
-	case "/login", "/manifest.json", "/custom.css", "/custom.logo", "/theme.css", "/theme.logo":
+	case "/login", "/health", "/manifest.json", "/theme.css", "/theme.logo", "/theme.favicon":
 		return true
 	}
 	return false
 }
 
-func isStaticPath(path string) bool {
-	return len(path) >= 8 && path[:8] == "/static/"
-}
+func isStaticPath(path string) bool { return len(path) >= 8 && path[:8] == "/static/" }
 
-func isHTMXRequest(r *http.Request) bool {
-	return r.Header.Get("HX-Request") == "true"
-}
+func isHTMXRequest(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" }
 
 // clientIP returns the best-effort remote IP for rate-limiting and audit
 // logging. When monbooru runs behind a reverse proxy (Caddy, Traefik, nginx

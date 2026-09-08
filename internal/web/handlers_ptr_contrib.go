@@ -114,9 +114,7 @@ type contribPreviewToAdd struct {
 // PTRDiffers reports whether the PTR spelling differs beyond the
 // mechanical underscore/space mapping, so the dialog only calls out
 // real renames.
-func (t contribPreviewToAdd) PTRDiffers() bool {
-	return strings.ReplaceAll(t.Tag, "_", " ") != t.PTR
-}
+func (t contribPreviewToAdd) PTRDiffers() bool { return strings.ReplaceAll(t.Tag, "_", " ") != t.PTR }
 
 // contribPreviewPTROnly mirrors monloader's ptr_only entry. Color is
 // monbooru's own category color for the row, filled at render time.
@@ -402,9 +400,7 @@ func (s *Server) ptrUnattributed(id int64, preview *contribPreview) []string {
 	return out
 }
 
-func isPTRSource(src tags.TagSource) bool {
-	return strings.EqualFold(src.Source, "ptr")
-}
+func isPTRSource(src tags.TagSource) bool { return strings.EqualFold(src.Source, "ptr") }
 
 // ptrContribPanel renders the image-page panel body: a one-line summary
 // from one preview, or the zero-work / provisional state. Absent when
@@ -459,7 +455,7 @@ func (s *Server) ptrContribPanel(w http.ResponseWriter, r *http.Request) {
 		"CanPull":       s.ptrPullOpen() && (len(petitionTags) > 0 || len(unattributed) > 0),
 		"ContribHint":   contribHint,
 		"Provisional":   preview.Provisional,
-		"FailedUploads": s.monloaderContribFailedSeed(),
+		"FailedUploads": s.mlStatus.Seed().ContribFailed,
 		"Monloader":     s.monloaderWebBase(),
 		"CSRFToken":     s.csrfToken(sessionFromContext(r.Context())),
 	})
@@ -547,13 +543,19 @@ func (s *Server) ptrContribSend(w http.ResponseWriter, r *http.Request) {
 			"kind": "mapping_petition", "sha256": sha, "tag": tag, "reason": petitionReason,
 		})
 	}
+	s.sendContribItems(w, r, "image "+strconv.FormatInt(id, 10), items)
+}
+
+// sendContribItems is the tail both contribution posts share: refuse an
+// empty selection, send under a bounded context, and swap in the receipt.
+func (s *Server) sendContribItems(w http.ResponseWriter, r *http.Request, scope string, items []map[string]any) {
 	if len(items) == 0 {
 		s.renderTemplate(w, "partials/ptr_contrib_flash.html", map[string]any{"Err": "nothing selected"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	resp, err := s.monloaderContribSend(ctx, "image "+strconv.FormatInt(id, 10), items)
+	resp, err := s.monloaderContribSend(ctx, scope, items)
 	if err != nil {
 		s.renderTemplate(w, "partials/ptr_contrib_flash.html", map[string]any{"Err": "contributions unavailable"})
 		return
@@ -639,8 +641,8 @@ func (s *Server) contribGateOpen() bool {
 	if !s.pairedWith("monloader") {
 		return false
 	}
-	_, _, ptrReady, _, contrib := s.monloaderStatusSeed()
-	return ptrReady && contrib
+	ml := s.mlStatus.Seed()
+	return ml.PTR && ml.Contrib
 }
 
 // contribReadOpen reports whether the read-only diff may render: paired and
@@ -651,27 +653,26 @@ func (s *Server) contribReadOpen() bool {
 	if !s.pairedWith("monloader") {
 		return false
 	}
-	_, _, ptrReady, ptrSyncing, _ := s.monloaderStatusSeed()
-	return ptrReady || ptrSyncing
+	ml := s.mlStatus.Seed()
+	return ml.PTR || ml.PTRSyncing
 }
 
 // ptrPullOpen reports whether the PTR pull actions may render: they ride the
 // lookup path, which monloader refuses until the index is caught up.
 func (s *Server) ptrPullOpen() bool {
-	_, _, ptrReady, _, _ := s.monloaderStatusSeed()
-	return ptrReady
+	return s.mlStatus.Seed().PTR
 }
 
 // contribHint reports whether the panel's Contribute button may act and,
 // when it cannot, why. The diff and Pull stay live either way.
 func (s *Server) contribHint() (bool, string) {
-	_, _, _, ptrSyncing, ptrContrib := s.monloaderStatusSeed()
+	ml := s.mlStatus.Seed()
 	switch {
-	case ptrContrib:
+	case ml.Contrib:
 		return true, ""
-	case ptrSyncing:
+	case ml.PTRSyncing:
 		return false, "the Public Tag Repository is still syncing"
-	case s.monloaderContribBannedSeed():
+	case ml.ContribBanned:
 		return false, "the contribution account is banned"
 	default:
 		return false, "a contribution account in monloader is required to contribute"
@@ -1044,7 +1045,7 @@ func (s *Server) tagPtrContribPanel(w http.ResponseWriter, r *http.Request) {
 		"CanContribute":  canContribute,
 		"ContribHint":    contribHint,
 		"Provisional":    diff.Provisional,
-		"FailedUploads":  s.monloaderContribFailedSeed(),
+		"FailedUploads":  s.mlStatus.Seed().ContribFailed,
 		"Monloader":      s.monloaderWebBase(),
 	})
 }
@@ -1141,18 +1142,7 @@ func (s *Server) tagPtrContribSend(w http.ResponseWriter, r *http.Request) {
 	}
 	appendPairs(r.Form["pair"], "suggest", suggestReason)
 	appendPairs(r.Form["pair_petition"], "petition", petitionReason)
-	if len(items) == 0 {
-		s.renderTemplate(w, "partials/ptr_contrib_flash.html", map[string]any{"Err": "nothing selected"})
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	resp, err := s.monloaderContribSend(ctx, "tag "+strconv.FormatInt(id, 10), items)
-	if err != nil {
-		s.renderTemplate(w, "partials/ptr_contrib_flash.html", map[string]any{"Err": "contributions unavailable"})
-		return
-	}
-	s.renderContribReceipt(w, items, resp)
+	s.sendContribItems(w, r, "tag "+strconv.FormatInt(id, 10), items)
 }
 
 // pairSendItem builds the stage item for a pair confirm: the suggest or

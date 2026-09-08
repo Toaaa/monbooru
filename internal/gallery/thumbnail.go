@@ -51,9 +51,7 @@ func ViewRenditionPath(dir string, imageID int64) string {
 // dimensions (a header nothing could read) answer false: without a size
 // there is nothing to decide on, and the original is what every other
 // unmeasurable file gets.
-func NeedsViewRendition(width, height int) bool {
-	return int64(width)*int64(height) > viewMaxPixels
-}
+func NeedsViewRendition(width, height int) bool { return int64(width)*int64(height) > viewMaxPixels }
 
 // EnsureViewRendition returns the cached rendition's path, generating it
 // from the original on first use. Lazy because only the rare oversized image

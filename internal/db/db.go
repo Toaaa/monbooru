@@ -206,7 +206,6 @@ func shrinkPool(ctx context.Context, pool *sql.DB) error {
 	return nil
 }
 
-// Close closes both connection pools.
 func (db *DB) Close() error {
 	var firstErr error
 	if err := db.Read.Close(); err != nil && firstErr == nil {

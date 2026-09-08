@@ -20,8 +20,9 @@ import (
 
 // ResolveSubdir validates a user-supplied folder path and returns the
 // absolute destination directory under galleryPath. An empty folder
-// yields the gallery root. Paths containing ".." or absolute paths are
-// rejected so callers cannot escape the root.
+// yields the gallery root. Absolute paths, and relative ones that still
+// climb out once normalized, are rejected so callers cannot escape the
+// root; a ".." that cancels out on the way ("a/../b") is just "b".
 func ResolveSubdir(galleryPath, folder string) (string, error) {
 	folder = strings.TrimSpace(folder)
 	if folder == "" {
@@ -33,9 +34,11 @@ func ResolveSubdir(galleryPath, folder string) (string, error) {
 		return "", fmt.Errorf("folder must be relative to the gallery root")
 	}
 	folder = strings.Trim(folder, "/\\")
+	// Judged after cleaning, so an interior `..` that cancels out ("a/../b")
+	// is a plain relative path and only a genuine climb is refused.
 	cleaned := filepath.Clean(filepath.ToSlash(folder))
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
-		return "", fmt.Errorf("folder path may not contain a .. segment")
+		return "", fmt.Errorf("folder path escapes the gallery root")
 	}
 	abs, err := filepath.Abs(filepath.Join(galleryPath, cleaned))
 	if err != nil {
@@ -96,24 +99,37 @@ const SupportedMIMETypes = "image/jpeg,image/png,image/webp,image/gif,video/mp4,
 // rename rule is consistent. The stat check is racy (TOCTOU); callers
 // needing stronger guarantees should O_CREATE|O_EXCL themselves.
 func UniqueDestPath(destDir, filename string) string {
-	return uniquePathBy(destDir, filename, func(stem, ext string, i int) string {
-		return fmt.Sprintf("%s_%d%s", stem, i, ext)
-	})
+	return uniquePathBy(destDir, filename, uploadSuffix)
 }
+
+func uploadSuffix(stem, ext string, i int) string { return fmt.Sprintf("%s_%d%s", stem, i, ext) }
 
 // uniquePathBy returns dir/filename when it is free, else the first name
 // nameNth produces that is. The stat check is racy (TOCTOU); callers needing
 // stronger guarantees should O_CREATE|O_EXCL themselves.
 func uniquePathBy(dir, filename string, nameNth func(stem, ext string, i int) string) string {
+	return uniquePathIn(dir, filename, nil, nameNth)
+}
+
+// uniquePathIn is uniquePathBy plus the destinations earlier rows of the same
+// run have taken but not written yet, so a dry run numbers the way the run
+// will instead of promising every row the same name.
+func uniquePathIn(dir, filename string, claimed map[string]struct{}, nameNth func(stem, ext string, i int) string) string {
+	free := func(p string) bool {
+		if _, taken := claimed[p]; taken {
+			return false
+		}
+		_, err := os.Stat(p)
+		return os.IsNotExist(err)
+	}
 	dst := filepath.Join(dir, filename)
-	if _, err := os.Stat(dst); os.IsNotExist(err) {
+	if free(dst) {
 		return dst
 	}
 	ext := filepath.Ext(filename)
 	stem := strings.TrimSuffix(filename, ext)
 	for i := 1; ; i++ {
-		candidate := filepath.Join(dir, nameNth(stem, ext, i))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		if candidate := filepath.Join(dir, nameNth(stem, ext, i)); free(candidate) {
 			return candidate
 		}
 	}
@@ -163,9 +179,7 @@ func HashFile(path string) (string, error) {
 
 // Md5File computes the MD5 of the file at path. Boorus key their posts on
 // md5; sha256 remains the content address, and md5 is never a dedup key.
-func Md5File(path string) (string, error) {
-	return hashFileWith(context.Background(), path, md5.New())
-}
+func Md5File(path string) (string, error) { return hashFileWith(context.Background(), path, md5.New()) }
 
 // HashFileDigests computes both stored digests of the file at path in one
 // read. Every path that writes images.sha256 goes through here, so the two
@@ -294,7 +308,6 @@ func hasMP4Brand(buf []byte) bool {
 	return false
 }
 
-// IsVideoType returns true for video file types.
 func IsVideoType(fileType string) bool {
 	return fileType == models.FileTypeMP4 || fileType == models.FileTypeWEBM
 }
@@ -302,17 +315,13 @@ func IsVideoType(fileType string) bool {
 // ExtForFileType returns the extension a file of this type is named with,
 // or "" when unmapped. Only for files monbooru names itself; an
 // operator's own file keeps the name they gave it.
-func ExtForFileType(fileType string) string {
-	return fileTypeMeta[fileType].ext
-}
+func ExtForFileType(fileType string) string { return fileTypeMeta[fileType].ext }
 
 // MIMEForFileType maps a stored file type to the media type to serve it
 // under, or "" when unmapped. Handlers set this explicitly because
 // http.ServeFile answers from the extension, which the bytes can
 // contradict.
-func MIMEForFileType(fileType string) string {
-	return fileTypeMeta[fileType].mime
-}
+func MIMEForFileType(fileType string) string { return fileTypeMeta[fileType].mime }
 
 // fileTypeMeta names each stored file type on disk and on the wire. An
 // unmapped type reads as the zero value, which both accessors report as "".

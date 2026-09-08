@@ -1,0 +1,14 @@
+{{define "partials/source_remove_form.html"}}
+<form method="POST" action="/images/{{.ImageID}}/{{.Action}}"
+      hx-post="/images/{{.ImageID}}/{{.Action}}" hx-swap="none"
+      hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+      hx-confirm="{{.Confirm}}"
+      data-confirm-danger="{{.Danger}}"
+      data-confirm-ok="Remove"
+      style="display:inline">
+  <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+  <input type="hidden" name="site" value="{{.Site}}">
+  <input type="hidden" name="post_id" value="{{.PostID}}">
+  <button type="submit" class="btn-link-accent" title="{{.Title}}">[×]</button>
+</form>
+{{end}}

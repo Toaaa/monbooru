@@ -24,9 +24,7 @@ import (
 )
 
 // IsAvailable reports whether at least one enabled tagger has its files.
-func IsAvailable(cfg *config.Config) bool {
-	return len(EnabledTaggers(cfg)) > 0
-}
+func IsAvailable(cfg *config.Config) bool { return len(EnabledTaggers(cfg)) > 0 }
 
 // buildSupportsInference is true in the tagger build, false in the noop
 // build.
@@ -94,9 +92,7 @@ func CheckProviderAvailable(provider string) error {
 }
 
 // AvailableTaggers returns every known tagger with availability set.
-func AvailableTaggers(cfg *config.Config) []TaggerStatus {
-	return DiscoverTaggers(cfg)
-}
+func AvailableTaggers(cfg *config.Config) []TaggerStatus { return DiscoverTaggers(cfg) }
 
 // Status snapshots the registered backend's cache state for the
 // operator UI.

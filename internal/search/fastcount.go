@@ -601,15 +601,19 @@ func parseBoolVal(v string) (bool, bool) {
 }
 
 // fastCountTagged returns the exact fast-path count for tagged:true and
-// autotagged:true. Computes visible_total - untagged_visible: the
+// autotagged:true, and for the bare form that builds the same
+// predicate. Computes visible_total - untagged_visible: the
 // untagged subtrahend is a NOT-EXISTS walk over image_tags that hits
 // multi-second p95 on a million-row library, so it rides the counts
-// cache that counts.Invalidate drops on every membership write. Falls
+// cache that counts.Invalidate drops on every membership write. A
+// source name leaves the shortcut to the ledger predicate. Falls
 // back to (0, false) on any DB error so the slow path takes over.
 func fastCountTagged(database *db.DB, e FilterExpr) (int, bool) {
-	val, ok := parseBoolVal(e.Val)
-	if !ok || !val {
-		return 0, false
+	if e.Val != "" {
+		val, ok := parseBoolVal(e.Val)
+		if !ok || !val {
+			return 0, false
+		}
 	}
 	visible, ok := fastVisibleCount(database)
 	if !ok {
@@ -681,6 +685,4 @@ func fastCountGenerated(database *db.DB, e FilterExpr) (int, bool) {
 // the NOT / ceiling bounds, the driver's density gate and the
 // similarity weights is computed once per invalidation rather than
 // once per caller.
-func fastVisibleCount(database *db.DB) (int, bool) {
-	return counts.VisibleCount(database)
-}
+func fastVisibleCount(database *db.DB) (int, bool) { return counts.VisibleCount(database) }

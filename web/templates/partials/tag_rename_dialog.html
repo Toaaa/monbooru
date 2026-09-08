@@ -10,9 +10,6 @@
       <label>New name</label>
       <input type="text" name="name" id="rename-new-name" required autocomplete="off">
     </div>
-    {{/* An alias has no old name worth keeping, so the listing hides the
-         row client-side per picked tag and the detail page - which knows
-         its one tag up front - drops it outright. */}}
     {{if .KeepAlias}}
     <div id="rename-keep-alias-row">
       <label style="display:block;font-size:12px">
@@ -23,10 +20,7 @@
     </div>
     {{end}}
     <div id="rename-error"></div>
-    <div class="dialog-actions">
-      <button type="submit">Rename</button>
-      <button type="button" onclick="document.getElementById('rename-dialog').close()">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "rename-dialog" "Submit" "Rename"}}
   </form>
 </dialog>
 {{end}}

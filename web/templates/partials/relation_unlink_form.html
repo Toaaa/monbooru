@@ -1,6 +1,6 @@
 {{define "partials/relation_unlink_form.html"}}
 <form hx-post="/relations/remove" hx-swap="none"
-      hx-on::after-request="if(event.detail.successful){window.location.reload()}" {{with .ExtraClass}}class="{{.}}" {{end}}style="display:inline"
+      hx-on::after-request="if(event.detail.successful){window.location.reload()}" {{with .ExtraClass}}class="{{.}}" {{end}}{{with .Edge}}data-edge="{{.}}" {{end}}style="display:inline"
       {{with .Confirm}}hx-confirm="{{.}}"{{end}}>
   <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
   <input type="hidden" name="type" value="{{.Type}}">

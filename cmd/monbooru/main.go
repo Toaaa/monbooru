@@ -21,6 +21,10 @@ import (
 )
 
 func main() {
+	// Before anything prints: the Windows artifacts are linked for the GUI
+	// subsystem, which is handed no console at all.
+	desktop.AttachConsole()
+
 	// Subcommand dispatch happens before flag.Parse so the
 	// subcommand's own flag set gets the argv tail unchanged.
 	if len(os.Args) >= 2 && os.Args[1] == "tagger-worker" {
@@ -75,12 +79,14 @@ func main() {
 
 	var seed func(*config.Config)
 	var profile internalweb.Desktop
+	var layout desktop.Layout
 	if *desktopMode {
 		dialogOnFatal = true
-		layout, err := desktop.Resolve(appName, explicitFlag("config", *configPath))
+		resolved, err := desktop.Resolve(appName, explicitFlag("config", *configPath))
 		if err != nil {
 			fatalf("resolving the desktop paths: %v", err)
 		}
+		layout = resolved
 		*configPath = layout.ConfigPath
 		profile = internalweb.Desktop{Active: true, LogDir: layout.LogDir}
 		// Before config load, so every fatal below reaches the file too.
@@ -90,14 +96,23 @@ func main() {
 			defer func() { _ = f.Close() }()
 		}
 		seed = desktopSeed(layout)
+	} else if !inContainer() {
+		seed = hostSeed(*configPath)
 	}
 
 	_, statErr := os.Stat(*configPath)
 	freshConfig := os.IsNotExist(statErr)
 
-	cfg, err := config.LoadWithDefaults(*configPath, seed)
+	load := config.LoadWithDefaults
+	if layout.Portable {
+		load = config.LoadPortable
+	}
+	cfg, err := load(*configPath, seed)
 	if err != nil {
 		fatalf("loading config: %v", err)
+	}
+	if layout.Portable {
+		portableGallery(layout, cfg)
 	}
 	logx.Set(cfg.Log.Level)
 	logx.Infof("config: bind=%s galleries=%d default=%q models=%s log=%s",
@@ -116,7 +131,7 @@ func main() {
 
 	srv, err := internalweb.NewServer(cfg, *configPath, jobManager, profile)
 	if err != nil {
-		if freshConfig && !*desktopMode {
+		if freshConfig && inContainer() {
 			log.Printf("monbooru wrote %s with default settings meant for the docker image.", *configPath)
 			log.Printf("edit gallery_path (your images), paths.data_path (db + thumbnails) and paths.model_path (optional auto-taggers), then run it again. docs: %s", internalweb.DocURL)
 		}

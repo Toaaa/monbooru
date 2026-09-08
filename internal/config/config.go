@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,6 +48,12 @@ type Config struct {
 	// bound to an inline array, so a file monbooru wrote would stop loading
 	// the moment a block was put back by hand.
 	Plugins []PluginConfig `toml:"plugin,omitempty"`
+
+	// portableBase is the folder a portable config's relative paths resolve
+	// against, and the one Save writes them back relative to. Empty for
+	// every other profile, where a relative path keeps its working-directory
+	// meaning. Unexported so the encoder never sees it.
+	portableBase string
 }
 
 // RelationsConfig drives the relations feature's runtime knobs.
@@ -89,24 +96,19 @@ type RelationsConfig struct {
 type ServerConfig struct {
 	BindAddress string `toml:"bind_address"`
 	BaseURL     string `toml:"base_url"`
-	// CustomCSS is an optional absolute path to a stylesheet that the
-	// operator drops next to monbooru.toml. When set, it is served at
-	// /custom.css and linked from the layout after the bundled main.css
-	// so :root overrides win the cascade.
-	CustomCSS string `toml:"custom_css"`
+	// CORSOrigins are browser origins allowed to call the REST API on top of
+	// base_url and the address a request arrives on. Each is a bare
+	// scheme://host[:port]; "*" allows any, which the API's cookie-free
+	// bearer auth makes survivable on a LAN.
+	CORSOrigins []string `toml:"cors_origins,omitempty"`
 	// BooruName overrides the brand shown in every page <title>, the
 	// topbar wordmark, and the login screen. Empty resolves to "Monbooru"
 	// at render time so existing libraries upgrade without a config edit.
 	BooruName string `toml:"name"`
-	// BooruLogo is an optional absolute path to a logo / favicon image
-	// served at /custom.logo. When set, it replaces both the favicon link
-	// and the topbar logo on every page. Path scope is gated at config
-	// load against the same trusted-roots check as CustomCSS.
-	BooruLogo string `toml:"logo"`
 	// Theme names an operator-installed theme under <configdir>/themes/ - a
-	// folder holding theme.css (and optionally logo.png) or a bare
-	// <name>.css. Always a basename, validated against the folder listing
-	// before it reaches ServeFile; empty is the shipped look.
+	// folder holding theme.css (and optionally logo.png and favicon.png) or
+	// a bare <name>.css. Always a basename, validated against the folder
+	// listing before it reaches ServeFile; empty is the shipped look.
 	Theme string `toml:"theme,omitempty"`
 	// ThemeColor is the #rgb / #rrggbb the web manifest reports as the
 	// splash and address-bar colour. The server can't read a custom
@@ -353,9 +355,7 @@ type TaggerConfig struct {
 var ValidExecutionProviders = []string{"cpu", "cuda", "directml", "tensorrt", "openvino", "coreml", "coremlv2"}
 
 // IsValidExecutionProvider reports whether v is a recognized provider name.
-func IsValidExecutionProvider(v string) bool {
-	return slices.Contains(ValidExecutionProviders, v)
-}
+func IsValidExecutionProvider(v string) bool { return slices.Contains(ValidExecutionProviders, v) }
 
 // TaggerAggregationCfg holds the frame-merge knob shared across every
 // configured tagger. MinHitFraction is the fraction of frames a label
@@ -688,26 +688,44 @@ func ValidateScheduleTime(v string) error {
 	return nil
 }
 
-// Load reads and decodes a TOML config file. If absent, creates it with defaults.
-func Load(path string) (*Config, error) { return LoadWithDefaults(path, nil) }
-
-// LoadWithDefaults is Load with the defaults adjusted by seed before a
-// missing file is written. seed runs only on that path: a config already on
-// disk is loaded as it stands, whatever profile is active, so the container
-// volume layout the shipped image depends on is never rewritten.
+// LoadWithDefaults reads and decodes a TOML config file, creating it from
+// the defaults when absent with seed's adjustments applied first. seed runs
+// only on that path: a config already on disk is loaded as it stands,
+// whatever profile is active, so the container volume layout the shipped
+// image depends on is never rewritten. A nil seed takes the defaults as
+// they come.
 func LoadWithDefaults(path string, seed func(*Config)) (*Config, error) {
-	cfg := Default()
+	return load(path, "", seed)
+}
 
-	_, err := os.Stat(path)
-	if os.IsNotExist(err) {
+// LoadPortable is LoadWithDefaults for an install that carries its own data:
+// the paths a file leaves out land beside it rather than on the container
+// mounts, the ones it names resolve against that folder, and Save writes
+// them back relative so the folder survives being moved or remounted. An
+// empty file is the marker the archives ship, and reads as a config still
+// to be created.
+func LoadPortable(path string, seed func(*Config)) (*Config, error) {
+	return load(path, filepath.Dir(path), seed)
+}
+
+func load(path, base string, seed func(*Config)) (*Config, error) {
+	cfg := Default()
+	cfg.portableBase = base
+	if base != "" {
+		portableDefaults(cfg)
+	}
+
+	fresh, err := absent(path, base != "")
+	if err != nil {
+		return nil, err
+	}
+	if fresh {
 		if seed != nil {
 			seed(cfg)
 		}
 		if writeErr := Save(cfg, path); writeErr != nil {
 			return nil, fmt.Errorf("creating default config: %w", writeErr)
 		}
-	} else if err != nil {
-		return nil, fmt.Errorf("checking config file: %w", err)
 	} else {
 		cfg.Galleries = nil
 		cfg.DefaultGallery = ""
@@ -718,6 +736,15 @@ func LoadWithDefaults(path string, seed func(*Config)) (*Config, error) {
 		if _, err := toml.DecodeFile(path, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config file %q: %w", path, err)
 		}
+		// A portable file that names no gallery still gets the folder the
+		// archive promises, rather than failing validation over it.
+		if base != "" && len(cfg.Galleries) == 0 {
+			cfg.Galleries = Default().Galleries
+			cfg.Galleries[0].GalleryPath = portableGalleryDir
+		}
+	}
+	if base != "" {
+		resolveIn(cfg, base)
 	}
 
 	migrateTaggerProvider(cfg)
@@ -732,6 +759,66 @@ func LoadWithDefaults(path string, seed func(*Config)) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// The layout a portable install uses in place of Default()'s container
+// mounts. Relative on purpose: that is what survives the folder being
+// moved or the stick coming back as another drive letter.
+const (
+	portableDataDir    = "data"
+	portableGalleryDir = "gallery"
+)
+
+func portableDefaults(cfg *Config) {
+	cfg.Paths.DataPath = portableDataDir
+	cfg.Paths.ModelPath = filepath.Join(portableDataDir, "models")
+	cfg.Galleries[0].GalleryPath = portableGalleryDir
+}
+
+// absent reports whether path holds no config yet. A portable install also
+// counts an empty file, which is the marker the archives ship so that
+// unpacking one is what opts into the layout.
+func absent(path string, portable bool) (bool, error) {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading config file: %w", err)
+	}
+	return portable && len(strings.TrimSpace(string(b))) == 0, nil
+}
+
+// resolveIn makes the stored paths absolute against base, so everything
+// downstream sees the same shape it does under every other profile.
+func resolveIn(cfg *Config, base string) {
+	cfg.Paths.DataPath = absIn(cfg.Paths.DataPath, base)
+	cfg.Paths.ModelPath = absIn(cfg.Paths.ModelPath, base)
+	for i := range cfg.Galleries {
+		cfg.Galleries[i].GalleryPath = absIn(cfg.Galleries[i].GalleryPath, base)
+	}
+}
+
+func absIn(path, base string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(base, path)
+}
+
+// relIn is absIn's inverse for what Save writes back. A path under the
+// install folder is stored relative to it and travels with the folder; one
+// outside - a gallery repointed at another disk - is the absolute truth and
+// stays that way.
+func relIn(path, base string) string {
+	if path == "" || base == "" {
+		return path
+	}
+	rel, err := filepath.Rel(base, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return path
+	}
+	return filepath.ToSlash(rel)
 }
 
 // migrateTaggerProvider maps the legacy use_cuda toggle onto the new
@@ -761,8 +848,12 @@ func Save(cfg *Config, path string) error {
 	// truncated monbooru.toml where the old one was, and Load refuses to
 	// parse it - taking the gallery registry, the password hash and every
 	// API token with it. A thumbnail regenerates; this does not.
+	out := cfg
+	if cfg.portableBase != "" {
+		out = portableForm(cfg)
+	}
 	if err := fsx.WriteAtomic(path, ".monbooru.toml.*", func(f *os.File) error {
-		if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+		if err := toml.NewEncoder(f).Encode(out); err != nil {
 			return fmt.Errorf("encoding config: %w", err)
 		}
 		return f.Sync()
@@ -771,6 +862,20 @@ func Save(cfg *Config, path string) error {
 	}
 	fsx.SyncDir(dir)
 	return nil
+}
+
+// portableForm is cfg with the paths that sit under the install folder
+// written back relative. It works on a copy: the running config keeps the
+// absolute paths every other reader expects.
+func portableForm(cfg *Config) *Config {
+	out := *cfg
+	out.Paths.DataPath = relIn(cfg.Paths.DataPath, cfg.portableBase)
+	out.Paths.ModelPath = relIn(cfg.Paths.ModelPath, cfg.portableBase)
+	out.Galleries = slices.Clone(cfg.Galleries)
+	for i := range out.Galleries {
+		out.Galleries[i].GalleryPath = relIn(out.Galleries[i].GalleryPath, cfg.portableBase)
+	}
+	return &out
 }
 
 // FindGallery returns the gallery with the given name, or nil.
@@ -839,9 +944,20 @@ func envStr(key, cur string) string {
 	return cur
 }
 
+// envList splits a comma-separated override, or returns cur when the var is
+// unset/empty. Blank entries are dropped by the caller's own validation.
+func envList(key string, cur []string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return cur
+	}
+	return strings.Split(v, ",")
+}
+
 func applyEnvOverrides(cfg *Config) {
 	cfg.Server.BindAddress = envStr("MONBOORU_SERVER_BIND_ADDRESS", cfg.Server.BindAddress)
 	cfg.Server.BaseURL = envStr("MONBOORU_SERVER_BASE_URL", cfg.Server.BaseURL)
+	cfg.Server.CORSOrigins = envList("MONBOORU_SERVER_CORS_ORIGINS", cfg.Server.CORSOrigins)
 	cfg.Server.MonloaderURL = envStr("MONBOORU_SERVER_MONLOADER_URL", cfg.Server.MonloaderURL)
 	// DATA_PATH stays inline: setting it must also recompute the derived paths.
 	if v := os.Getenv("MONBOORU_PATHS_DATA_PATH"); v != "" {
@@ -966,7 +1082,33 @@ func validate(cfg *Config) error {
 		cfg.Auth.SessionLifetimeDays = defaultSessionLifetimeDays
 	}
 	dropInvalidPlugins(cfg)
+	dropInvalidCORSOrigins(cfg)
 	return nil
+}
+
+// dropInvalidCORSOrigins normalises the hand-written allow-list and discards
+// what a browser could never send, rather than refusing to start over a typo
+// in an optional list. Browsers spell an origin without a trailing slash and
+// without a path, so anything carrying one would match nothing.
+func dropInvalidCORSOrigins(cfg *Config) {
+	for i, o := range cfg.Server.CORSOrigins {
+		cfg.Server.CORSOrigins[i] = strings.TrimRight(strings.TrimSpace(o), "/")
+	}
+	cfg.Server.CORSOrigins = slices.DeleteFunc(cfg.Server.CORSOrigins, func(o string) bool {
+		if o == "*" || isOrigin(o) {
+			return false
+		}
+		logx.Warnf("config: dropping server.cors_origins entry %q - want a bare scheme://host[:port]", o)
+		return true
+	})
+}
+
+// isOrigin reports whether s is a scheme and host and nothing else. The
+// scheme is left open so a browser extension's own origin qualifies.
+func isOrigin(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme != "" && u.Host != "" &&
+		u.Path == "" && u.RawQuery == "" && u.Fragment == "" && u.User == nil
 }
 
 // dropInvalidPlugins warns about and discards hand-written [[plugin]] blocks

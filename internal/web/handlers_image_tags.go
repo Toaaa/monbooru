@@ -45,7 +45,7 @@ func (s *Server) parseTagInput(tagInput string) ([]catTag, []string, string) {
 	// general category id is cached on galleryCtx at open time so this
 	// hot path doesn't re-query the immutable built-in row.
 	var generalID int64
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		generalID = cx.GeneralCategoryID
 	}
 
@@ -238,7 +238,7 @@ func (s *Server) addTagToImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mutated {
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 		w.Header().Set("HX-Trigger", "tags-changed")
 	}
 
@@ -308,7 +308,7 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 	// the swap that lands the tag can move it, so it rides along. The
 	// callers invalidate before rendering, so this reads post-write.
 	tagCount := 0
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		tagCount, _ = cx.TagCount()
 	}
 	var canonicalPath string
@@ -316,7 +316,7 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 	// The delete confirm names the copies that go with the row, and this
 	// fragment re-renders it out of band. Counted the way the Duplicates
 	// panel counts, so the two never disagree.
-	extraPaths := max(len(loadImagePaths(r.Context(), s.db(), id))-1, 0)
+	extraPaths := extraImagePaths(loadImagePaths(r.Context(), s.db(), id))
 	filename := ""
 	if canonicalPath != "" {
 		filename = filepath.Base(canonicalPath)
@@ -494,7 +494,7 @@ func (s *Server) removeImageTagsWithMsg(w http.ResponseWriter, r *http.Request, 
 		s.renderTagListWithSidebar(w, r, id, err.Error(), "", "", false)
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	w.Header().Set("HX-Trigger", "tags-changed")
 	s.renderTagListWithSidebar(w, r, id, "", "", msg, false)
 }
@@ -518,7 +518,7 @@ func (s *Server) removeTagFromImage(w http.ResponseWriter, r *http.Request) {
 		s.renderTagListWithSidebar(w, r, id, err.Error(), "", "", false)
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	w.Header().Set("HX-Trigger", "tags-changed")
 	okMsg := "removed 1 tag"
 	if name != "" {
@@ -576,7 +576,7 @@ func (s *Server) changeTagCategory(w http.ResponseWriter, r *http.Request) {
 	// cat:/category-qualified searches resolve via the moved tag's
 	// new category, so cached match-id lists for those queries can't
 	// survive the move.
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	if isHTMXRequest(r) {
 		if merged {
 			writeInlineFlash(w, "ok", "Merged into the existing tag.")

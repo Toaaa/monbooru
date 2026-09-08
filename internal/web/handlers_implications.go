@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/monbooru/monbooru/internal/db"
+	"github.com/monbooru/monbooru/internal/jobs"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/tags"
@@ -90,7 +91,7 @@ func (s *Server) declareImplications(w http.ResponseWriter, r *http.Request, fie
 	if added > 0 {
 		// New targets may have been created via GetOrCreateTag, so the
 		// cached tag count is stale until the next render.
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 	}
 	return added, failures, true
 }
@@ -281,7 +282,7 @@ func (s *Server) runImplicationGroupSweep(edges []models.Implication) {
 	if err := s.tagSvc().RecalcIDs(implied); err != nil {
 		logx.Warnf("implication group sweep recalc: %v", err)
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	s.finishJob(nil, cancelled,
 		fmt.Sprintf("implication sweep cancelled (%d/%d)", processed, total),
 		fmt.Sprintf("swept %d removed implication(s)", processed))
@@ -381,7 +382,7 @@ func (s *Server) runImplicationPropagation(parentID, impliedID int64, op string)
 		}
 	}
 
-	processed, cancelled, err := chunkedJob(ctx, s.jobs, ids, chunkSize, verb, func(chunk []int64) error {
+	processed, cancelled, err := jobs.Chunked(ctx, s.jobs, ids, chunkSize, verb, func(chunk []int64) error {
 		tx, err := s.db().Write.Begin()
 		if err != nil {
 			return err
@@ -414,7 +415,7 @@ func (s *Server) runImplicationPropagation(parentID, impliedID int64, op string)
 	if err := s.tagSvc().RecalcIDs([]int64{impliedID}); err != nil {
 		logx.Warnf("implication propagation recalc: %v", err)
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	s.jobs.Complete(fmt.Sprintf("%s applied to %d image(s)", verb, processed))
 }
 

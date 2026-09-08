@@ -9,11 +9,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
-    REPO=$(cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]') && \
-    DOC=$(cat DOC.md 2>/dev/null | tr -d '[:space:]') && \
+RUN . ./packaging/release-env.sh && \
     CGO_ENABLED=1 go build -tags tagger \
-    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Package=docker' -X 'github.com/monbooru/monbooru/internal/web.Variant=openvino'" \
+    -ldflags="-s -w $LDFLAGS -X '$MOD.Package=docker' -X '$MOD.Variant=openvino'" \
     -o /monbooru ./cmd/monbooru
 
 # Stage 2: runtime -- Intel OpenVINO 2026.3 on Ubuntu 22.04 (x86_64 only).
@@ -26,12 +24,14 @@ COPY --from=build /monbooru /usr/local/bin/monbooru
 ARG FFMPEG_BUILD=v8.1.2-mb2
 ARG FFMPEG_NAME=ffmpeg-8.1.2-mb2
 ARG FFMPEG_SHA256_LINUX64=256131407bd62df7ff2d870073d9f7cc14e6cc0123cebd3616497805bc45f168
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
       ca-certificates curl xz-utils && \
     curl -fsSL "https://github.com/monbooru/ffmpeg-builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_NAME}-linux64.tar.xz" -o /tmp/ffmpeg.tar.xz && \
     echo "${FFMPEG_SHA256_LINUX64}  /tmp/ffmpeg.tar.xz" | sha256sum -c - && \
     mkdir -p /tmp/ff && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
     cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/ && \
+    mkdir -p /usr/share/doc/ffmpeg && cp /tmp/ff/licenses/* /usr/share/doc/ffmpeg/ && \
     apt-get purge -y curl xz-utils && apt-get autoremove -y && \
     rm -rf /tmp/ff /tmp/ffmpeg.tar.xz /var/lib/apt/lists/*
 
@@ -43,7 +43,8 @@ ARG ORT_OPENVINO_VERSION=1.23.0
 
 # Link the whole capi directory, not just libonnxruntime.so: the provider
 # library pulls in the wheel's bundled OpenVINO by soname.
-RUN pip install --no-cache-dir onnxruntime-openvino==${ORT_OPENVINO_VERSION} && \
+RUN pip install --no-cache-dir -U pip && \
+    pip install --no-cache-dir onnxruntime-openvino==${ORT_OPENVINO_VERSION} && \
     PKG_DIR=$(python3 -c "import onnxruntime, os; print(os.path.dirname(onnxruntime.__file__))") && \
     find "$PKG_DIR" -name "*.so*" -type f -exec ln -sf {} /usr/local/lib/ \; && \
     ORT_FILE=$(find "$PKG_DIR" -name "libonnxruntime.so.*" | head -1) && \
@@ -57,7 +58,8 @@ RUN mkdir -p /home/monbooru && chown 1000:1000 /home/monbooru
 USER 1000:1000
 
 ENV HOME=/home/monbooru \
-    MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
+    MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455 \
+    MONBOORU_CONTAINER=1
 
 EXPOSE 8455
 

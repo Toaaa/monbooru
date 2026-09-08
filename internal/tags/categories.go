@@ -211,7 +211,7 @@ func (s *Service) DeleteCategoryMoveOrDelete(id int64, action string, targetID i
 			// The rating category holds its four canonical rows and nothing
 			// else, the same refusal the single-tag move makes.
 			if s.ratingCatID != 0 && targetID == s.ratingCatID {
-				return ErrRatingTagImmutable
+				return ErrRatingCategoryClosed
 			}
 			switch targetID {
 			case 0:

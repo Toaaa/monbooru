@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"github.com/monbooru/monbooru/internal/jobs"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
+	"github.com/monbooru/monbooru/internal/monloader"
 	"github.com/monbooru/monbooru/internal/plugins"
 	"github.com/monbooru/monbooru/internal/search"
 	"github.com/monbooru/monbooru/internal/tagger"
@@ -100,73 +102,24 @@ type Server struct {
 	quitOnce sync.Once
 	restart  atomic.Bool
 
-	// schedReload wakes runScheduler so a Settings → Schedule edit takes
-	// effect on the next select tick instead of waiting out the current
-	// sleep. Buffered cap 1 with non-blocking sends so concurrent saves
-	// coalesce into one reload.
-	schedReload chan struct{}
-
-	// ctxMu serialises the gallery mutations and is held read-locked by
-	// ContextMiddleware for the length of a request, so a swap cannot land
-	// mid-render. The state itself is read through the atomic pointer, never
-	// through the lock: a handler re-entering ctxMu while the middleware
-	// holds it read-locked would block behind a pending writer, and that
-	// writer waits on the read lock the handler is inside.
+	// ctxMu serialises the gallery mutations and is held read-locked for the
+	// length of a gallery-read request, so a swap cannot land mid-render. The
+	// state itself is read through the atomic pointer, never through the
+	// lock: a handler re-entering ctxMu while its registration holds it
+	// read-locked would block behind a pending writer, and that writer waits
+	// on the read lock the handler is inside.
 	ctxMu    sync.RWMutex
 	galState atomic.Pointer[galleryState]
 
-	// schedMu guards the last-schedule-run fields. Written by runScheduler,
-	// read by the Schedule settings section.
-	schedMu       sync.Mutex
-	schedLastRun  time.Time
-	schedLastDur  time.Duration
-	schedLastInfo string // "OK" or a short failure summary; empty when never run
-	// schedLookupInfo is what the last run's lookup phases found, one line
-	// per phase and gallery; the run-level info above cannot carry it.
-	schedLookupInfo []string
-	// schedGalleryOffset is where the next run starts in the gallery list,
-	// so a budget too small for the first gallery cannot starve the rest.
-	schedGalleryOffset int
+	sched *scheduler
 
-	// monloaderStatusMu guards the cached footer-light probe result. base()
-	// seeds every page's initial render from it so the light shows its last
-	// known state at once instead of flickering back to "checking" (and
-	// re-probing monloader) on every navigation; the poll refreshes it at
-	// most once per monloaderStatusTTL.
-	monloaderStatusMu      sync.Mutex
-	monloaderConn          string
-	monloaderVersion       string
-	monloaderPTR           bool
-	monloaderPTRSyncing    bool
-	monloaderContrib       bool
-	monloaderContribBanned bool
-	monloaderContribFailed int
-	monloaderCheckedAt     time.Time
+	mlStatus *monloader.StatusCache
 
-	// themeWarnMu guards themeWarned, the last unresolvable server.theme
-	// value reported. Theme resolution runs on every render, so the warning
-	// is deduped rather than repeated per page.
-	themeWarnMu sync.Mutex
-	themeWarned string
+	themeWarn *themeWarnings
 
-	// pluginSupervisor owns the child process of every dropped plugin the
-	// operator enabled. The supervision state lives there rather than on
-	// Server so launch, restart backoff and stop-grace are exercisable
-	// without a whole HTTP server.
-	pluginSupervisor *plugins.Supervisor
+	peers *plugins.Peers
 
-	// pluginProbeMu guards pluginProbes, one cached /health result per paired
-	// plugin. Button rendering gates on it, so a peer that went away stops
-	// offering surfaces that would only fail.
-	pluginProbeMu sync.Mutex
-	pluginProbes  map[string]pluginProbe
-
-	// fetchStatusMu guards fetchStatus, the last-known outcome of each image's
-	// source metadata fetch. monloader runs the fetch asynchronously and calls
-	// the enrich endpoint back; the detail page polls for the outcome so the
-	// tags show up (or the failure surfaces) without a manual reload.
-	fetchStatusMu sync.Mutex
-	fetchStatus   map[string]fetchStatusEntry
+	fetchStatus *fetchStatusStore
 }
 
 // Desktop is what the -desktop profile tells the server: whether it is
@@ -184,7 +137,6 @@ type Desktop struct {
 func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager, dk Desktop) (*Server, error) {
 	sessions := NewSessionStore()
 
-	// Parse all templates
 	tmpl, err := template.New("").Funcs(templateFuncs()).ParseFS(webFS.FS, "templates/*.html", "templates/partials/*.html")
 	if err != nil {
 		return nil, err
@@ -210,11 +162,12 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager, 
 		folderOpener: desktop.OpenFolder,
 		logDir:       dk.LogDir,
 		quit:         make(chan struct{}),
-		schedReload:  make(chan struct{}, 1),
-		fetchStatus:  map[string]fetchStatusEntry{},
-		pluginProbes: map[string]pluginProbe{},
+		sched:        newScheduler(),
+		mlStatus:     &monloader.StatusCache{},
+		fetchStatus:  newFetchStatusStore(),
+		themeWarn:    &themeWarnings{},
 	}
-	s.pluginSupervisor = plugins.New(s.pluginCallbackURL, s.done)
+	s.peers = plugins.NewPeers(s.pluginCallbackURL, s.done)
 
 	applyRelationsConfig(cfg.Relations)
 
@@ -231,23 +184,6 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager, 
 	}
 	s.galState.Store(opened)
 
-	// Validate the operator-supplied custom CSS path lives in a directory
-	// monbooru already trusts (config dir, /config, or /data). Any other
-	// path could leak the file's contents at /custom.css to LAN viewers
-	// when the operator misconfigures the value (typo: /etc/passwd) - a
-	// footgun the threat model treats as in-scope.
-	if cfg.Server.CustomCSS != "" {
-		if !customCSSPathAllowed(cfg.Server.CustomCSS, configPath) {
-			logx.Warnf("server.custom_css %q lives outside the trusted dirs (configdir, /config, /data); the link is suppressed", cfg.Server.CustomCSS)
-			s.cfg.Server.CustomCSS = ""
-		}
-	}
-	if cfg.Server.BooruLogo != "" {
-		if !customCSSPathAllowed(cfg.Server.BooruLogo, configPath) {
-			logx.Warnf("server.logo %q lives outside the trusted dirs (configdir, /config, /data); the override is suppressed", cfg.Server.BooruLogo)
-			s.cfg.Server.BooruLogo = ""
-		}
-	}
 	if cfg.Server.ThemeColor != "" && !tags.IsValidCategoryColor(cfg.Server.ThemeColor) {
 		logx.Warnf("server.theme_color %q is not a #rgb / #rrggbb colour; the bundled palette is used", cfg.Server.ThemeColor)
 		s.cfg.Server.ThemeColor = ""
@@ -299,9 +235,7 @@ const (
 
 // reclaimDue reports whether an idle tick owes a reclaim: a job ended
 // since the last one, or the interval has elapsed.
-func reclaimDue(jobEnded bool, since time.Duration) bool {
-	return jobEnded || since >= reclaimInterval
-}
+func reclaimDue(jobEnded bool, since time.Duration) bool { return jobEnded || since >= reclaimInterval }
 
 // runMemoryReclaim wakes every reclaimTick and, when no job is active,
 // drops each gallery's idle in-memory indexes, shrinks its SQLite page
@@ -337,7 +271,7 @@ func (s *Server) runMemoryReclaim() {
 				}
 			}
 			search.AdjacencyCacheSweep()
-			s.pruneFetchStatus()
+			s.fetchStatus.prune()
 			s.reconcileAllLookups()
 			debug.FreeOSMemory()
 			s.cfgMu.Lock()
@@ -381,69 +315,63 @@ func (s *Server) galleryState() *galleryState { return s.galState.Load() }
 // activeGallery names the runtime-active gallery.
 func (s *Server) activeGallery() string { return s.galleryState().active }
 
-// Active returns the currently-active gallery context.
-func (s *Server) Active() *galleryCtx {
+// active returns the currently-active gallery context.
+func (s *Server) active() *galleryCtx {
 	st := s.galleryState()
 	return st.contexts[st.active]
 }
 
-// Get returns the gallery context with the given name, or nil.
-func (s *Server) Get(name string) *galleryCtx { return s.galleryState().contexts[name] }
+// get returns the gallery context with the given name, or nil.
+func (s *Server) get(name string) *galleryCtx { return s.galleryState().contexts[name] }
 
-// ContextMiddleware RLocks ctxMu for the request so a concurrent swap can't
-// tear state out under it. Mutation endpoints bypass it because they take
-// the write lock themselves.
-func (s *Server) ContextMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if contextMiddlewareBypass(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
+// routeMode is what a route says about ctxMu, the lock that keeps a gallery
+// swap from landing in the middle of a request.
+type routeMode int
+
+const (
+	// modeRead holds ctxMu read-locked around the handler, so the gallery it
+	// resolves cannot be closed under it. The default, and what any route
+	// that renders or queries a gallery wants.
+	modeRead routeMode = iota
+	// modeWrite takes no lock here: the handler takes ctxMu.Lock itself, and
+	// deadlocks against a read the registration had already taken.
+	modeWrite
+	// modeFree takes no lock and promises not to hold a gallery context
+	// across the unlocked window - either it reads no gallery at all, or its
+	// slow part is an outbound call that a held read lock would stall a
+	// gallery switch behind.
+	modeFree
+)
+
+// routes is the only way to reach the mux: registerRoutes never names it, so
+// a route has to pick a mode to compile at all.
+type routes struct {
+	s     *Server
+	mux   *http.ServeMux
+	modes map[string]routeMode
+}
+
+func (s *Server) newRoutes() *routes {
+	return &routes{s: s, mux: http.NewServeMux(), modes: map[string]routeMode{}}
+}
+
+func (rt *routes) add(pattern string, mode routeMode, h http.HandlerFunc) {
+	rt.modes[pattern] = mode
+	rt.mux.HandleFunc(pattern, h)
+}
+
+func (rt *routes) read(pattern string, h http.HandlerFunc) {
+	s := rt.s
+	rt.add(pattern, modeRead, func(w http.ResponseWriter, r *http.Request) {
 		s.ctxMu.RLock()
 		defer s.ctxMu.RUnlock()
-		next.ServeHTTP(w, r)
+		h(w, r)
 	})
 }
 
-func contextMiddlewareBypass(path string) bool {
-	switch path {
-	case "/internal/gallery/switch", "/custom.css", "/custom.logo", "/theme.css", "/theme.logo", "/manifest.json":
-		return true
-	case "/setup":
-		// The wizard's submit repoints the default gallery, which takes the
-		// write lock.
-		return true
-	}
-	if strings.HasPrefix(path, "/i/") {
-		// /i/{sha} can switch the active gallery (write lock) when the image
-		// lives in another gallery, so it must not run under the request-held
-		// read lock.
-		return true
-	}
-	if path == "/internal/monloader-status" || path == "/internal/monloader/disconnect" || path == "/internal/monloader/reconnect" ||
-		path == "/internal/plugin/relay" || strings.HasPrefix(path, "/settings/plugins/") ||
-		strings.HasPrefix(path, pluginMountPrefix) {
-		// These poll / probe a peer over HTTP and touch no gallery context;
-		// holding the read lock across the outbound call would stall a switch.
-		// The plugin mount is the longest of them: a peer's page is served for
-		// as long as the peer takes to serve it.
-		return true
-	}
-	if (strings.HasPrefix(path, "/images/") || strings.HasPrefix(path, "/tags/")) &&
-		(strings.HasSuffix(path, "/sources/fetch") || strings.HasSuffix(path, "/lookup") ||
-			strings.HasSuffix(path, "/replace") ||
-			strings.HasSuffix(path, "/ptr-contrib-panel") || strings.HasSuffix(path, "/ptr-contrib-dialog") ||
-			strings.HasSuffix(path, "/ptr-contrib") || strings.HasSuffix(path, "/ptr-lookup-preview") ||
-			strings.HasSuffix(path, "/ptr-lookup-search")) {
-		// These proxy to monloader over HTTP; holding the request read lock
-		// across the outbound call would stall a gallery switch. The handlers
-		// read their rows under their own short locks.
-		return true
-	}
-	return strings.HasPrefix(path, "/static/") ||
-		strings.HasPrefix(path, "/thumbnails/") ||
-		strings.HasPrefix(path, "/settings/galleries")
-}
+func (rt *routes) write(pattern string, h http.HandlerFunc) { rt.add(pattern, modeWrite, h) }
+
+func (rt *routes) free(pattern string, h http.HandlerFunc) { rt.add(pattern, modeFree, h) }
 
 // StartWatchers starts a watcher on every configured gallery at startup. Each
 // gallery owns its own watcher for the lifetime of the process so file drops
@@ -465,24 +393,43 @@ func (s *Server) StartWatchers() {
 
 // Handler returns the root HTTP handler with all middleware applied.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
+	rt := s.newRoutes()
+	s.registerRoutes(rt)
 
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(s.staticFS))))
-	mux.HandleFunc("GET /custom.css", s.serveCustomCSS)
-	mux.HandleFunc("GET /custom.logo", s.serveCustomLogo)
-	mux.HandleFunc("GET /theme.css", s.serveThemeCSS)
-	mux.HandleFunc("GET /theme.logo", s.serveThemeLogo)
-	mux.HandleFunc("GET /manifest.json", s.manifestHandler)
-	mux.HandleFunc("GET /thumbnails/{gallery}/{file}", s.serveThumbnail)
+	// Middleware order, outermost first: logging, session, first-run gate,
+	// CSRF. The gallery lock is not among them any more - every route takes
+	// it at its own registration, or names the reason it does not.
+	var h http.Handler = rt.mux
+	h = s.cSRFMiddleware(h)
+	h = s.setupMiddleware(h)
+	h = s.sessionMiddleware(h)
+	h = loggingMiddleware(h)
+
+	return h
+}
+
+// registerRoutes wires every route with the gallery-context mode it needs.
+func (s *Server) registerRoutes(rt *routes) {
+	// The assets are free because none of them reads a gallery row; the
+	// thumbnail route resolves a context only to take its directory.
+	rt.free("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(s.staticFS))).ServeHTTP)
+	rt.free("GET /theme.css", s.serveThemeCSS)
+	rt.free("GET /theme.logo", s.serveThemeLogo)
+	rt.free("GET /theme.favicon", s.serveThemeFavicon)
+	rt.free("GET /manifest.json", s.manifestHandler)
+	rt.free("GET /thumbnails/{gallery}/{file}", s.serveThumbnail)
 	// Fallback icon for tabs with no <link rel="icon"> (a raw image opened
 	// in a new tab). Route through the override so server.logo applies;
 	// non-permanent since that target can change.
-	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+	rt.read("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, s.booruFaviconURL(), http.StatusFound)
 	})
 
-	// Health check (unauthenticated)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	rt.read("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		// A liveness probe is not worth refusing over its Origin: the browser
+		// enforces the block on its own, and a monitor that happens to send
+		// one should still get an answer.
+		api.SetCORS(w, r, s.cfgSnapshot())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		// "app" is what lets a second launch tell our own instance from
@@ -490,264 +437,276 @@ func (s *Server) Handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]string{"app": "monbooru", "status": "ok", "version": Version})
 	})
 
-	mux.HandleFunc("GET /login", s.loginPage)
-	mux.HandleFunc("POST /login", s.loginPost)
-	mux.HandleFunc("POST /logout", s.logoutPost)
+	rt.read("GET /login", s.loginPage)
+	rt.read("POST /login", s.loginPost)
+	rt.read("POST /logout", s.logoutPost)
 
-	mux.HandleFunc("POST /upload", s.uploadPost)
+	rt.read("POST /upload", s.uploadPost)
 
 	// Root only; `GET /` below is the catch-all for unmatched paths. The
 	// `/{$}` pattern wins over `/` for the exact root.
-	mux.HandleFunc("GET /{$}", s.galleryHandler)
-	mux.HandleFunc("GET /", s.notFoundHandler)
+	rt.read("GET /{$}", s.galleryHandler)
+	rt.read("GET /", s.notFoundHandler)
 
-	mux.HandleFunc("GET /i/{sha}", s.imageByHashHandler)
-	mux.HandleFunc("GET /images/{id}", s.detailHandler)
-	mux.HandleFunc("GET /images/{id}/related", s.relatedImagesHandler)
-	mux.HandleFunc("GET /images/{id}/file", s.serveImageFile)
-	mux.HandleFunc("GET /images/{id}/view", s.serveImageView)
-	mux.HandleFunc("GET /images/{id}/page/{n}", s.serveMangaPage)
-	mux.HandleFunc("GET /images/{id}/page/{n}/thumb", s.serveMangaPageThumb)
-	mux.HandleFunc("POST /images/{id}/page/{n}/extract", s.extractMangaPage)
-	mux.HandleFunc("POST /images/{id}/generate-collection", s.generateMangaCollection)
-	mux.HandleFunc("GET /images/{id}/read", s.readerHandler)
-	mux.HandleFunc("GET /images/{id}/pages", s.pagesGridHandler)
-	mux.HandleFunc("POST /images/{id}/tags", s.addTagToImage)
-	mux.HandleFunc("DELETE /images/{id}/tags", s.removeAllTagsFromImageHandler)
-	mux.HandleFunc("DELETE /images/{id}/user-tags", s.removeUserTagsFromImageHandler)
-	mux.HandleFunc("DELETE /images/{id}/auto-tags", s.removeAutoTagsFromImageHandler)
-	mux.HandleFunc("DELETE /images/{id}/source-tags", s.removeSourceTagsFromImageHandler)
-	mux.HandleFunc("DELETE /images/{id}/stale-tags", s.removeStaleTagsFromImageHandler)
-	mux.HandleFunc("DELETE /images/{id}/category-tags", s.removeCategoryTagsFromImageHandler)
-	mux.HandleFunc("DELETE /images/{id}/source-contribution", s.dropSourceContributionHandler)
-	mux.HandleFunc("DELETE /images/{id}/tags/{tagID}", s.removeTagFromImage)
-	mux.HandleFunc("POST /images/{id}/favorite", s.toggleFavorite)
-	mux.HandleFunc("POST /images/{id}/inbox", s.toggleInbox)
-	mux.HandleFunc("DELETE /images/{id}", s.deleteImage)
-	mux.HandleFunc("POST /images/{id}/canonical-path", s.promoteCanonical)
-	mux.HandleFunc("POST /images/{id}/sources/set", s.setSource)
-	mux.HandleFunc("POST /images/{id}/sources/remove", s.removeSource)
-	mux.HandleFunc("POST /images/{id}/sources/primary", s.makeSourcePrimary)
-	mux.HandleFunc("POST /images/{id}/sources/keep", s.keepLocalFile)
-	mux.HandleFunc("POST /images/{id}/annotations/set", s.setAnnotation)
-	mux.HandleFunc("POST /images/{id}/annotations/remove", s.removeAnnotation)
-	mux.HandleFunc("POST /images/{id}/markup/preview", s.previewMarkup)
-	mux.HandleFunc("POST /images/{id}/sources/fetch", s.fetchSource)
-	mux.HandleFunc("POST /images/{id}/lookup", s.lookupImage)
-	mux.HandleFunc("POST /images/{id}/replace", s.replaceImage)
-	mux.HandleFunc("GET /images/{id}/ptr-contrib-panel", s.ptrContribPanel)
-	mux.HandleFunc("GET /images/{id}/ptr-contrib-dialog", s.ptrContribDialog)
-	mux.HandleFunc("POST /images/{id}/ptr-contrib", s.ptrContribSend)
-	mux.HandleFunc("POST /images/{id}/note", s.setNote)
-	mux.HandleFunc("POST /internal/batch-lookup/count", s.batchLookupCount)
-	mux.HandleFunc("POST /images/{id}/scheduled-lookup", s.scheduledLookupPost)
-	mux.HandleFunc("POST /images/{id}/scheduled-lookup/reset", s.scheduledLookupResetPost)
-	mux.HandleFunc("POST /images/{id}/commentary/set", s.setSourceCommentary)
-	mux.HandleFunc("POST /images/{id}/commentary/remove", s.removeSourceCommentary)
-	mux.HandleFunc("POST /images/{id}/original/set", s.setSourceOriginal)
-	mux.HandleFunc("POST /images/{id}/original/remove", s.removeSourceOriginal)
-	mux.HandleFunc("POST /images/{id}/collections/set", s.setCollection)
-	mux.HandleFunc("POST /images/{id}/collections/remove", s.removeCollection)
-	mux.HandleFunc("POST /images/{id}/move", s.moveImage)
-	mux.HandleFunc("POST /images/{id}/rename", s.renameImage)
-	mux.HandleFunc("POST /images/{id}/transfer", s.transferImage)
-	mux.HandleFunc("DELETE /images/{id}/aliases/{pathID}", s.deleteAlias)
+	// Switches the active gallery when the image lives in another one.
+	rt.write("GET /i/{sha}", s.imageByHashHandler)
+	rt.read("GET /images/{id}", s.detailHandler)
+	rt.read("GET /images/{id}/related", s.relatedImagesHandler)
+	rt.read("GET /images/{id}/file", s.serveImageFile)
+	rt.read("GET /images/{id}/view", s.serveImageView)
+	rt.read("GET /images/{id}/page/{n}", s.serveMangaPage)
+	rt.read("GET /images/{id}/page/{n}/thumb", s.serveMangaPageThumb)
+	rt.read("POST /images/{id}/page/{n}/extract", s.extractMangaPage)
+	rt.read("POST /images/{id}/generate-collection", s.generateMangaCollection)
+	rt.read("GET /images/{id}/read", s.readerHandler)
+	rt.read("GET /images/{id}/pages", s.pagesGridHandler)
+	rt.read("POST /images/{id}/tags", s.addTagToImage)
+	rt.read("DELETE /images/{id}/tags", s.removeAllTagsFromImageHandler)
+	rt.read("DELETE /images/{id}/user-tags", s.removeUserTagsFromImageHandler)
+	rt.read("DELETE /images/{id}/auto-tags", s.removeAutoTagsFromImageHandler)
+	rt.read("DELETE /images/{id}/source-tags", s.removeSourceTagsFromImageHandler)
+	rt.read("DELETE /images/{id}/stale-tags", s.removeStaleTagsFromImageHandler)
+	rt.read("DELETE /images/{id}/category-tags", s.removeCategoryTagsFromImageHandler)
+	rt.read("DELETE /images/{id}/source-contribution", s.dropSourceContributionHandler)
+	rt.read("DELETE /images/{id}/tags/{tagID}", s.removeTagFromImage)
+	rt.read("POST /images/{id}/favorite", s.toggleFavorite)
+	rt.read("POST /images/{id}/inbox", s.toggleInbox)
+	rt.read("DELETE /images/{id}", s.deleteImage)
+	rt.read("POST /images/{id}/canonical-path", s.promoteCanonical)
+	rt.read("POST /images/{id}/sources/set", s.setSource)
+	rt.read("POST /images/{id}/sources/remove", s.removeSource)
+	rt.read("POST /images/{id}/sources/primary", s.makeSourcePrimary)
+	rt.read("POST /images/{id}/sources/keep", s.keepLocalFile)
+	rt.read("POST /images/{id}/annotations/set", s.setAnnotation)
+	rt.read("POST /images/{id}/annotations/remove", s.removeAnnotation)
+	rt.read("POST /images/{id}/markup/preview", s.previewMarkup)
+	// The peer-bound routes are free so the outbound call is not made under
+	// a read lock a gallery switch would then queue behind; each reads its
+	// own rows under a short lock instead.
+	rt.free("POST /images/{id}/sources/fetch", s.fetchSource)
+	rt.free("POST /images/{id}/lookup", s.lookupImage)
+	rt.free("POST /images/{id}/replace", s.replaceImage)
+	rt.free("GET /images/{id}/ptr-contrib-panel", s.ptrContribPanel)
+	rt.free("GET /images/{id}/ptr-contrib-dialog", s.ptrContribDialog)
+	rt.free("POST /images/{id}/ptr-contrib", s.ptrContribSend)
+	rt.read("POST /images/{id}/note", s.setNote)
+	rt.read("POST /internal/batch-lookup/count", s.batchLookupCount)
+	rt.read("POST /images/{id}/scheduled-lookup", s.scheduledLookupPost)
+	rt.read("POST /images/{id}/scheduled-lookup/reset", s.scheduledLookupResetPost)
+	rt.read("POST /images/{id}/commentary/set", s.setSourceCommentary)
+	rt.read("POST /images/{id}/commentary/remove", s.removeSourceCommentary)
+	rt.read("POST /images/{id}/translation/set", s.setSourceTranslation)
+	rt.read("POST /images/{id}/translation/remove", s.removeSourceTranslation)
+	rt.read("POST /images/{id}/original/set", s.setSourceOriginal)
+	rt.read("POST /images/{id}/original/remove", s.removeSourceOriginal)
+	rt.read("POST /images/{id}/collections/set", s.setCollection)
+	rt.read("POST /images/{id}/collections/remove", s.removeCollection)
+	rt.read("POST /images/{id}/place", s.placeImage)
+	rt.read("POST /images/{id}/transfer", s.transferImage)
+	rt.read("DELETE /images/{id}/aliases/{pathID}", s.deleteAlias)
 
-	mux.HandleFunc("GET /tags", s.tagsHandler)
-	mux.HandleFunc("GET /tags/{id}", s.tagDetailHandler)
-	mux.HandleFunc("GET /tags/{id}/usage", s.tagUsagePanelHandler)
-	mux.HandleFunc("POST /tags/batch-category", s.batchTagCategoryPost)
-	mux.HandleFunc("POST /tags/batch-alias", s.batchTagAliasPost)
-	mux.HandleFunc("POST /tags/merge-folded", s.batchMergeFoldedPost)
-	mux.HandleFunc("POST /tags/batch-imply", s.batchTagImplyPost)
-	mux.HandleFunc("POST /tags/new", s.createTagPost)
-	mux.HandleFunc("POST /tags/aliases", s.createAliasPost)
-	mux.HandleFunc("POST /tags/{id}/rename", s.renameTagPost)
-	mux.HandleFunc("DELETE /tags/{id}", s.deleteTagHandler)
-	mux.HandleFunc("PATCH /tags/{id}/category", s.changeTagCategory)
-	mux.HandleFunc("GET /tags/{id}/implications", s.implicationsDialogHandler)
-	mux.HandleFunc("POST /tags/{id}/implications", s.addImplicationPost)
-	mux.HandleFunc("POST /tags/{id}/implied-by", s.addImpliedByPost)
-	mux.HandleFunc("POST /tags/{id}/aliases", s.addTagAliasPost)
+	rt.read("GET /tags", s.tagsHandler)
+	rt.read("GET /tags/{id}", s.tagDetailHandler)
+	rt.read("GET /tags/{id}/usage", s.tagUsagePanelHandler)
+	rt.read("POST /tags/batch-category", s.batchTagCategoryPost)
+	rt.read("POST /tags/batch-alias", s.batchTagAliasPost)
+	rt.read("POST /tags/merge-folded", s.batchMergeFoldedPost)
+	rt.read("POST /tags/batch-imply", s.batchTagImplyPost)
+	rt.read("POST /tags/new", s.createTagPost)
+	rt.read("POST /tags/aliases", s.createAliasPost)
+	rt.read("POST /tags/{id}/rename", s.renameTagPost)
+	rt.read("DELETE /tags/{id}", s.deleteTagHandler)
+	rt.read("PATCH /tags/{id}/category", s.changeTagCategory)
+	rt.read("GET /tags/{id}/implications", s.implicationsDialogHandler)
+	rt.read("POST /tags/{id}/implications", s.addImplicationPost)
+	rt.read("POST /tags/{id}/implied-by", s.addImpliedByPost)
+	rt.read("POST /tags/{id}/aliases", s.addTagAliasPost)
 	// The group deletes carry the /group suffix because a bare
 	// `DELETE /tags/{id}/aliases` overlaps `DELETE /tags/categories/{id}`
 	// with neither pattern more specific, which the mux refuses.
-	mux.HandleFunc("DELETE /tags/{id}/implications/group", s.removeImplicationsDelete)
-	mux.HandleFunc("DELETE /tags/{id}/implied-by/group", s.removeImpliedByDelete)
-	mux.HandleFunc("DELETE /tags/{id}/aliases/group", s.removeTagAliasesDelete)
-	mux.HandleFunc("DELETE /tags/{id}/implications/{impliedID}", s.removeImplicationDelete)
-	mux.HandleFunc("POST /tags/categories", s.createCategoryPost)
-	mux.HandleFunc("POST /tags/categories/{id}/rename", s.renameCategoryPost)
-	mux.HandleFunc("DELETE /tags/categories/{id}", s.deleteCategoryDelete)
-	mux.HandleFunc("GET /tags/categories/{id}/count", s.categoryCountHandler)
+	rt.read("DELETE /tags/{id}/implications/group", s.removeImplicationsDelete)
+	rt.read("DELETE /tags/{id}/implied-by/group", s.removeImpliedByDelete)
+	rt.read("DELETE /tags/{id}/aliases/group", s.removeTagAliasesDelete)
+	rt.read("DELETE /tags/{id}/implications/{impliedID}", s.removeImplicationDelete)
+	rt.read("POST /tags/categories", s.createCategoryPost)
+	rt.read("POST /tags/categories/{id}/rename", s.renameCategoryPost)
+	rt.read("DELETE /tags/categories/{id}", s.deleteCategoryDelete)
+	rt.read("GET /tags/categories/{id}/count", s.categoryCountHandler)
 
-	mux.HandleFunc("GET /collections", s.collectionsHandler)
-	mux.HandleFunc("POST /collections/rename", s.renameCollectionPost)
-	mux.HandleFunc("POST /collections/dissolve", s.dissolveCollectionPost)
-	mux.HandleFunc("POST /collections/find-relations", s.collectionFindRelationsPost)
-	mux.HandleFunc("GET /collections/order", s.collectionOrderDialog)
-	mux.HandleFunc("POST /collections/order", s.reorderCollectionPost)
-	mux.HandleFunc("POST /collections/generate-cbz", s.generateCollectionCBZ)
+	rt.read("GET /collections", s.collectionsHandler)
+	rt.read("POST /collections/rename", s.renameCollectionPost)
+	rt.read("POST /collections/dissolve", s.dissolveCollectionPost)
+	rt.read("POST /collections/find-relations", s.collectionFindRelationsPost)
+	rt.read("GET /collections/order", s.collectionOrderDialog)
+	rt.read("POST /collections/order", s.reorderCollectionPost)
+	rt.read("POST /collections/generate-cbz", s.generateCollectionCBZ)
 
-	mux.HandleFunc("GET /categories", s.categoriesHandler)
+	rt.read("GET /categories", s.categoriesHandler)
 
-	mux.HandleFunc("GET /settings", s.settingsHandler)
-	mux.HandleFunc("POST /settings/general", s.settingsGeneralPost)
-	mux.HandleFunc("POST /settings/monloader", s.settingsMonloaderPost)
-	mux.HandleFunc("POST /settings/tagger", s.settingsTaggerPost)
-	mux.HandleFunc("POST /settings/auth/password", s.settingsPasswordPost)
-	mux.HandleFunc("POST /settings/auth/remove-password", s.settingsRemovePasswordPost)
-	mux.HandleFunc("POST /settings/auth/tokens", s.settingsTokenCreate)
-	mux.HandleFunc("DELETE /settings/auth/tokens/{id}", s.settingsTokenRevoke)
-	mux.HandleFunc("GET /settings/auth/tokens/{id}/privileges", s.settingsTokenPrivilegesGet)
-	mux.HandleFunc("POST /settings/auth/tokens/{id}/privileges", s.settingsTokenPrivilegesPost)
-	mux.HandleFunc("PATCH /settings/categories/{id}", s.updateCategoryPatch)
-	mux.HandleFunc("POST /settings/schedule", s.settingsSchedulePost)
-	mux.HandleFunc("POST /settings/schedule/run", s.settingsScheduleRunPost)
-	mux.HandleFunc("GET /setup", s.setupPage)
-	mux.HandleFunc("POST /setup", s.setupPost)
-	mux.HandleFunc("GET /internal/browse", s.browseDirs)
-	mux.HandleFunc("POST /internal/open-folder", s.openFolder)
-	mux.HandleFunc("POST /settings/desktop", s.settingsDesktopPost)
-	mux.HandleFunc("POST /settings/quit", s.settingsQuit)
-	mux.HandleFunc("POST /settings/restart", s.settingsRestart)
-	mux.HandleFunc("POST /settings/maintenance/prune-missing", s.pruneMissingImagesPost)
-	mux.HandleFunc("POST /settings/maintenance/prune-orphaned-thumbnails", s.pruneOrphanedThumbnailsPost)
-	mux.HandleFunc("POST /settings/maintenance/recalc-tags", s.recalcTagsPost)
-	mux.HandleFunc("POST /settings/maintenance/tag-conflicts", s.tagCategoryConflictsPost)
-	mux.HandleFunc("POST /settings/maintenance/find-folded-duplicates", s.findFoldedDuplicatesPost)
-	mux.HandleFunc("POST /settings/maintenance/lookup-due", s.lookupDuePost)
+	rt.read("GET /settings", s.settingsHandler)
+	rt.read("POST /settings/general", s.settingsGeneralPost)
+	rt.read("POST /settings/monloader", s.settingsMonloaderPost)
+	rt.read("POST /settings/tagger", s.settingsTaggerPost)
+	rt.read("POST /settings/auth/password", s.settingsPasswordPost)
+	rt.read("POST /settings/auth/remove-password", s.settingsRemovePasswordPost)
+	rt.read("POST /settings/auth/tokens", s.settingsTokenCreate)
+	rt.read("DELETE /settings/auth/tokens/{id}", s.settingsTokenRevoke)
+	rt.read("GET /settings/auth/tokens/{id}/privileges", s.settingsTokenPrivilegesGet)
+	rt.read("POST /settings/auth/tokens/{id}/privileges", s.settingsTokenPrivilegesPost)
+	rt.read("PATCH /settings/categories/{id}", s.updateCategoryPatch)
+	rt.read("POST /settings/schedule", s.settingsSchedulePost)
+	rt.read("POST /settings/schedule/run", s.settingsScheduleRunPost)
+	rt.read("GET /setup", s.setupPage)
+	// The wizard's submit repoints the default gallery.
+	rt.write("POST /setup", s.setupPost)
+	rt.read("GET /internal/browse", s.browseDirs)
+	rt.read("POST /internal/open-folder", s.openFolder)
+	rt.read("POST /settings/desktop", s.settingsDesktopPost)
+	rt.read("POST /settings/quit", s.settingsQuit)
+	rt.read("POST /settings/restart", s.settingsRestart)
+	rt.read("POST /settings/maintenance/prune-missing", s.pruneMissingImagesPost)
+	rt.read("POST /settings/maintenance/prune-orphaned-thumbnails", s.pruneOrphanedThumbnailsPost)
+	rt.read("POST /settings/maintenance/empty-folders", s.emptyFoldersScanPost)
+	rt.read("POST /settings/maintenance/empty-folders/remove", s.emptyFoldersRemovePost)
+	rt.read("POST /settings/maintenance/recalc-tags", s.recalcTagsPost)
+	rt.read("POST /settings/maintenance/tag-conflicts", s.tagCategoryConflictsPost)
+	rt.read("POST /settings/maintenance/find-folded-duplicates", s.findFoldedDuplicatesPost)
+	rt.read("POST /settings/maintenance/lookup-due", s.lookupDuePost)
 	// Relocated to /relations/file-duplicates/* in v1.8; old routes
 	// stay alive as 301 redirects for one release so bookmarks survive.
-	mux.HandleFunc("GET /settings/maintenance/duplicates-list", func(w http.ResponseWriter, r *http.Request) {
+	rt.read("GET /settings/maintenance/duplicates-list", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/relations/file-duplicates/list", http.StatusMovedPermanently)
 	})
-	mux.HandleFunc("POST /settings/maintenance/remove-duplicates", func(w http.ResponseWriter, r *http.Request) {
+	rt.read("POST /settings/maintenance/remove-duplicates", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/relations/file-duplicates/remove", http.StatusMovedPermanently)
 	})
-	mux.HandleFunc("GET /relations/file-duplicates/list", s.duplicatesListHandler)
-	mux.HandleFunc("POST /relations/file-duplicates/remove", s.removeDuplicatesPost)
-	mux.HandleFunc("POST /relations/file-duplicates/promote", s.promoteAliasPathPost)
-	mux.HandleFunc("GET /relations/duplicates/sha256", s.sha256WalkerPage)
-	mux.HandleFunc("POST /relations/duplicates/sha256/remove-one", s.sha256WalkerRemoveOnePost)
-	mux.HandleFunc("GET /relations/duplicates/marked", s.markedWalkerPage)
-	mux.HandleFunc("POST /relations/duplicates/marked/delete-one", s.markedWalkerDeleteOnePost)
-	mux.HandleFunc("POST /relations/duplicates/marked/delete-all", s.markedWalkerDeleteAllPost)
-	mux.HandleFunc("GET /relations", s.relationsPage)
-	mux.HandleFunc("GET /relations/browse", s.browseRelationsPage)
-	mux.HandleFunc("GET /relations/browse-groups", s.browseGroupsRedirect)
-	mux.HandleFunc("GET /relations/session", s.sessionPage)
-	mux.HandleFunc("POST /relations/session/decide", s.sessionDecidePost)
-	mux.HandleFunc("POST /relations/dup-group/{id}/copy-tags", s.copyTagsToOriginalPost)
-	mux.HandleFunc("GET /relations/dup-group/{id}/copy-tags/preview", s.copyTagsToOriginalPreview)
-	mux.HandleFunc("POST /settings/relations", s.settingsRelationsPost)
-	mux.HandleFunc("POST /settings/maintenance/re-extract-metadata", s.reExtractMetadataPost)
-	mux.HandleFunc("POST /settings/maintenance/rebuild-thumbnails", s.rebuildThumbnailsPost)
-	mux.HandleFunc("POST /settings/maintenance/compute-hashes", s.computeHashesPost)
-	mux.HandleFunc("POST /relations/find-pairs", s.findRelationPairsPost)
-	mux.HandleFunc("POST /relations/reset-skipped", s.resetSkippedPost)
-	mux.HandleFunc("POST /relations/phash/{id}/recompute", s.recomputePhashPost)
-	mux.HandleFunc("POST /relations/add", s.addRelationPost)
-	mux.HandleFunc("POST /relations/remove", s.removeRelationPost)
-	mux.HandleFunc("POST /relations/reverse", s.reverseRelationPost)
-	mux.HandleFunc("POST /relations/browse-groups/merge", s.mergeGroupsPost)
-	mux.HandleFunc("POST /relations/browse-groups/dissolve", s.dissolveGroupsPost)
-	mux.HandleFunc("GET /internal/images/{id}/md5", s.md5CellGet)
-	mux.HandleFunc("GET /internal/images/{id}/related-entries", s.relatedEntriesGet)
-	mux.HandleFunc("GET /internal/images/{id}/fetch-status", s.fetchStatusHandler)
-	mux.HandleFunc("GET /images/{id}/relations", s.imageRelationsPage)
-	mux.HandleFunc("POST /settings/maintenance/vacuum-db", s.vacuumDBPost)
-	mux.HandleFunc("POST /settings/maintenance/free-memory", s.freeMemoryPost)
-	mux.HandleFunc("POST /settings/tagger/{name}/enable", s.settingsTaggerEnablePost)
-	mux.HandleFunc("POST /settings/tagger/{name}/disable", s.settingsTaggerDisablePost)
-	mux.HandleFunc("POST /settings/tagger/{name}/delete", s.settingsTaggerDeletePost)
-	mux.HandleFunc("GET /settings/tagger/{name}/config", s.settingsTaggerConfigGet)
-	mux.HandleFunc("POST /settings/tagger/{name}/config", s.settingsTaggerConfigPost)
-	mux.HandleFunc("GET /settings/tagger/{name}/labels", s.settingsTaggerLabelsGet)
-	mux.HandleFunc("POST /settings/tagger/{name}/mapping", s.settingsTaggerMappingPost)
-	mux.HandleFunc("POST /settings/tagger/{name}/reset", s.settingsTaggerResetPost)
+	rt.read("GET /relations/file-duplicates/list", s.duplicatesListHandler)
+	rt.read("POST /relations/file-duplicates/remove", s.removeDuplicatesPost)
+	rt.read("POST /relations/file-duplicates/promote", s.promoteAliasPathPost)
+	rt.read("GET /relations/duplicates/sha256", s.sha256WalkerPage)
+	rt.read("POST /relations/duplicates/sha256/remove-one", s.sha256WalkerRemoveOnePost)
+	rt.read("GET /relations/duplicates/marked", s.markedWalkerPage)
+	rt.read("POST /relations/duplicates/marked/delete-one", s.markedWalkerDeleteOnePost)
+	rt.read("POST /relations/duplicates/marked/delete-all", s.markedWalkerDeleteAllPost)
+	rt.read("GET /relations", s.relationsPage)
+	rt.read("GET /relations/browse", s.browseRelationsPage)
+	rt.read("GET /relations/browse-groups", s.browseGroupsRedirect)
+	rt.read("GET /relations/session", s.sessionPage)
+	rt.read("POST /relations/session/decide", s.sessionDecidePost)
+	rt.read("POST /relations/dup-group/{id}/copy-tags", s.copyTagsToOriginalPost)
+	rt.read("GET /relations/dup-group/{id}/copy-tags/preview", s.copyTagsToOriginalPreview)
+	rt.read("POST /settings/relations", s.settingsRelationsPost)
+	rt.read("POST /settings/maintenance/re-extract-metadata", s.reExtractMetadataPost)
+	rt.read("POST /settings/maintenance/rebuild-thumbnails", s.rebuildThumbnailsPost)
+	rt.read("POST /settings/maintenance/compute-hashes", s.computeHashesPost)
+	rt.read("POST /relations/find-pairs", s.findRelationPairsPost)
+	rt.read("POST /relations/reset-skipped", s.resetSkippedPost)
+	rt.read("POST /relations/phash/{id}/recompute", s.recomputePhashPost)
+	rt.read("POST /relations/add", s.addRelationPost)
+	rt.read("POST /relations/remove", s.removeRelationPost)
+	rt.read("POST /relations/reverse", s.reverseRelationPost)
+	rt.read("POST /relations/browse-groups/merge", s.mergeGroupsPost)
+	rt.read("POST /relations/browse-groups/dissolve", s.dissolveGroupsPost)
+	rt.read("GET /internal/images/{id}/md5", s.md5CellGet)
+	rt.read("GET /internal/images/{id}/related-entries", s.relatedEntriesGet)
+	rt.read("GET /internal/images/{id}/fetch-status", s.fetchStatusHandler)
+	rt.read("GET /images/{id}/relations", s.imageRelationsPage)
+	rt.read("POST /settings/maintenance/vacuum-db", s.vacuumDBPost)
+	rt.read("POST /settings/maintenance/free-memory", s.freeMemoryPost)
+	rt.read("POST /settings/tagger/{name}/enable", s.settingsTaggerEnablePost)
+	rt.read("POST /settings/tagger/{name}/disable", s.settingsTaggerDisablePost)
+	rt.read("POST /settings/tagger/{name}/delete", s.settingsTaggerDeletePost)
+	rt.read("GET /settings/tagger/{name}/config", s.settingsTaggerConfigGet)
+	rt.read("POST /settings/tagger/{name}/config", s.settingsTaggerConfigPost)
+	rt.read("GET /settings/tagger/{name}/labels", s.settingsTaggerLabelsGet)
+	rt.read("POST /settings/tagger/{name}/mapping", s.settingsTaggerMappingPost)
+	rt.read("POST /settings/tagger/{name}/reset", s.settingsTaggerResetPost)
 
 	// Saved searches are managed from the sidebar (no dedicated search page).
-	mux.HandleFunc("POST /search/saved", s.createSavedSearch)
-	mux.HandleFunc("DELETE /search/saved/{id}", s.deleteSavedSearch)
+	rt.read("POST /search/saved", s.createSavedSearch)
+	rt.read("DELETE /search/saved/{id}", s.deleteSavedSearch)
 
-	mux.HandleFunc("GET /internal/job/status", s.jobStatusHandler)
-	mux.HandleFunc("GET /internal/monloader-status", s.monloaderStatusHandler)
-	mux.HandleFunc("POST /internal/job/dismiss", s.jobDismissPost)
-	mux.HandleFunc("POST /internal/job/cancel", s.jobCancelPost)
-	mux.HandleFunc("POST /internal/sync", s.syncTrigger)
-	mux.HandleFunc("POST /internal/autotag", s.autotagTrigger)
-	mux.HandleFunc("POST /internal/batch-delete", s.batchDelete)
-	mux.HandleFunc("POST /internal/batch-move", s.batchMove)
-	mux.HandleFunc("POST /internal/batch-rename", s.batchRename)
-	mux.HandleFunc("POST /internal/batch-transfer", s.batchTransfer)
-	mux.HandleFunc("POST /internal/batch-tag", s.batchTag)
-	mux.HandleFunc("POST /internal/batch-strip", s.batchStrip)
-	mux.HandleFunc("POST /internal/batch-inbox", s.batchInbox)
-	mux.HandleFunc("POST /internal/batch-favorite", s.batchFavorite)
-	mux.HandleFunc("POST /internal/batch-collection", s.batchCollection)
-	mux.HandleFunc("POST /internal/batch-lookup", s.batchLookup)
-	mux.HandleFunc("POST /internal/delete-search", s.deleteSearchPost)
-	mux.HandleFunc("POST /tags/delete-search", s.deleteTagsSearchPost)
-	mux.HandleFunc("POST /tags/ptr-lookup-search", s.ptrLookupSearchPost)
-	mux.HandleFunc("GET /tags/{id}/ptr-contrib-panel", s.tagPtrContribPanel)
-	mux.HandleFunc("GET /tags/{id}/ptr-contrib-dialog", s.tagPtrContribDialog)
-	mux.HandleFunc("POST /tags/{id}/ptr-contrib", s.tagPtrContribSend)
-	mux.HandleFunc("GET /tags/{id}/ptr-lookup-dialog", s.tagPtrLookupDialog)
-	mux.HandleFunc("GET /tags/{id}/ptr-lookup-preview", s.tagPtrLookupPreview)
-	mux.HandleFunc("GET /tags/{id}/ptr-lookup-search", s.tagPtrLookupSearch)
-	mux.HandleFunc("POST /tags/{id}/ptr-lookup", s.ptrLookupTagPost)
-	mux.HandleFunc("POST /internal/delete-folder", s.deleteFolderPost)
-	mux.HandleFunc("GET /internal/tags/suggest", s.tagSuggest)
-	mux.HandleFunc("GET /internal/search/suggest", s.searchSuggest)
-	mux.HandleFunc("GET /internal/folders/suggest", s.foldersSuggest)
-	mux.HandleFunc("GET /internal/collection/suggest", s.collectionSuggest)
-	mux.HandleFunc("GET /internal/source/suggest", s.sourceSuggest)
-	mux.HandleFunc("GET /internal/name/preview", s.namePreview)
-	mux.HandleFunc("GET /internal/sidebar", s.gallerySidebar)
-	mux.HandleFunc("GET /internal/sidebar-browse", s.sidebarBrowse)
-	mux.HandleFunc("POST /internal/rating-ceiling", s.ratingCeilingPost)
-	mux.HandleFunc("POST /images/{id}/autotag", s.autotagImage)
-	mux.HandleFunc("GET /images/{id}/tags", s.getImageTagsHandler)
+	rt.read("GET /internal/job/status", s.jobStatusHandler)
+	rt.free("GET /internal/monloader-status", s.monloaderStatusHandler)
+	rt.read("POST /internal/job/dismiss", s.jobDismissPost)
+	rt.read("POST /internal/job/cancel", s.jobCancelPost)
+	rt.read("POST /internal/sync", s.syncTrigger)
+	rt.read("POST /internal/autotag", s.autotagTrigger)
+	rt.read("POST /internal/batch-delete", s.batchDelete)
+	rt.read("POST /internal/batch-place", s.batchPlace)
+	rt.read("POST /internal/batch-transfer", s.batchTransfer)
+	rt.read("POST /internal/batch-tag", s.batchTag)
+	rt.read("POST /internal/batch-strip", s.batchStrip)
+	rt.read("POST /internal/batch-inbox", s.batchInbox)
+	rt.read("POST /internal/batch-favorite", s.batchFavorite)
+	rt.read("POST /internal/batch-collection", s.batchCollection)
+	rt.read("POST /internal/batch-lookup", s.batchLookup)
+	rt.read("POST /internal/delete-search", s.deleteSearchPost)
+	rt.read("POST /tags/delete-search", s.deleteTagsSearchPost)
+	rt.free("POST /tags/ptr-lookup-search", s.ptrLookupSearchPost)
+	rt.free("GET /tags/{id}/ptr-contrib-panel", s.tagPtrContribPanel)
+	rt.free("GET /tags/{id}/ptr-contrib-dialog", s.tagPtrContribDialog)
+	rt.free("POST /tags/{id}/ptr-contrib", s.tagPtrContribSend)
+	rt.read("GET /tags/{id}/ptr-lookup-dialog", s.tagPtrLookupDialog)
+	rt.free("GET /tags/{id}/ptr-lookup-preview", s.tagPtrLookupPreview)
+	rt.free("GET /tags/{id}/ptr-lookup-search", s.tagPtrLookupSearch)
+	rt.read("POST /tags/{id}/ptr-lookup", s.ptrLookupTagPost)
+	rt.read("POST /internal/delete-folder", s.deleteFolderPost)
+	rt.read("GET /internal/tags/suggest", s.tagSuggest)
+	rt.read("GET /internal/search/suggest", s.searchSuggest)
+	rt.read("GET /internal/search/ids", s.searchIDs)
+	rt.read("GET /internal/folders/suggest", s.foldersSuggest)
+	rt.read("GET /internal/collection/suggest", s.collectionSuggest)
+	rt.read("GET /internal/source/suggest", s.sourceSuggest)
+	rt.read("GET /internal/name/preview", s.namePreview)
+	rt.read("GET /internal/sidebar", s.gallerySidebar)
+	rt.read("GET /internal/sidebar-browse", s.sidebarBrowse)
+	rt.read("POST /internal/rating-ceiling", s.ratingCeilingPost)
+	rt.read("POST /internal/view-prefs", s.viewPrefsPost)
+	rt.read("POST /images/{id}/autotag", s.autotagImage)
+	rt.read("GET /images/{id}/tags", s.getImageTagsHandler)
 
-	mux.HandleFunc("POST /internal/gallery/switch", s.gallerySwitchHandler)
-	mux.HandleFunc("POST /settings/galleries", s.settingsGalleriesPost)
-	mux.HandleFunc("POST /settings/galleries/{name}/rename", s.settingsGalleryRenamePost)
-	mux.HandleFunc("POST /settings/galleries/{name}/delete", s.settingsGalleryDeletePost)
-	mux.HandleFunc("POST /settings/galleries/{name}/default", s.settingsGalleryDefaultPost)
-	mux.HandleFunc("GET /settings/galleries/{name}/export", s.settingsGalleryExport)
-	mux.HandleFunc("POST /settings/galleries/{name}/import", s.settingsGalleryImport)
+	// The gallery mutations take the write lock themselves. The export is
+	// not one of them: it streams a whole database out and holds the read
+	// lock for the length of it, so a removal waits rather than closing the
+	// handles mid-stream.
+	rt.write("POST /internal/gallery/switch", s.gallerySwitchHandler)
+	rt.write("POST /settings/galleries", s.settingsGalleriesPost)
+	rt.write("POST /settings/galleries/{name}/rename", s.settingsGalleryRenamePost)
+	rt.write("POST /settings/galleries/{name}/delete", s.settingsGalleryDeletePost)
+	rt.write("POST /settings/galleries/{name}/default", s.settingsGalleryDefaultPost)
+	rt.read("GET /settings/galleries/{name}/export", s.settingsGalleryExport)
+	rt.write("POST /settings/galleries/{name}/import", s.settingsGalleryImport)
 
-	mux.HandleFunc("POST /api/v1/pair/request", s.pairRequest)
-	mux.HandleFunc("GET /api/v1/pair/status", s.pairStatus)
-	mux.HandleFunc("POST /api/v1/pair/remove", s.pairTeardown)
-	mux.HandleFunc("GET /internal/plugins/pairing", s.pluginPairingFragment)
-	mux.HandleFunc("POST /settings/plugins/pair/{id}/approve", s.pluginPairApprove)
-	mux.HandleFunc("POST /settings/plugins/pair/{id}/deny", s.pluginPairDeny)
-	mux.HandleFunc("POST /settings/plugins/{name}/remove", s.pluginPairRemove)
-	mux.HandleFunc("POST /settings/plugins/{name}/pause", s.pluginPause)
-	mux.HandleFunc("POST /settings/plugins/{name}/start", s.pluginStart)
-	mux.HandleFunc("POST /settings/plugins/{name}/stop", s.pluginStop)
-	mux.HandleFunc("POST /settings/plugins/theme", s.settingsThemePost)
-	mux.HandleFunc("POST /internal/monloader/disconnect", s.monloaderLightDisconnect)
-	mux.HandleFunc("POST /internal/monloader/reconnect", s.monloaderLightReconnect)
-	mux.HandleFunc("POST /internal/plugin/relay", s.pluginRelay)
+	rt.read("POST /api/v1/pair/request", s.pairRequest)
+	rt.read("GET /api/v1/pair/status", s.pairStatus)
+	rt.read("POST /api/v1/pair/remove", s.pairTeardown)
+	rt.read("GET /internal/plugins/pairing", s.pluginPairingFragment)
+	// Free for the same outbound reason: the plugin mount is the longest of
+	// them, serving a peer's page for as long as the peer takes.
+	rt.free("POST /settings/plugins/pair/{id}/approve", s.pluginPairApprove)
+	rt.free("POST /settings/plugins/pair/{id}/deny", s.pluginPairDeny)
+	rt.free("POST /settings/plugins/{name}/remove", s.pluginPairRemove)
+	rt.free("POST /settings/plugins/{name}/pause", s.pluginPause)
+	rt.free("POST /settings/plugins/{name}/start", s.pluginStart)
+	rt.free("POST /settings/plugins/{name}/stop", s.pluginStop)
+	rt.free("POST /settings/plugins/theme", s.settingsThemePost)
+	rt.free("POST /internal/monloader/disconnect", s.monloaderLightDisconnect)
+	rt.free("POST /internal/monloader/reconnect", s.monloaderLightReconnect)
+	rt.free("POST /internal/plugin/relay", s.pluginRelay)
 	// What a page needs: its own GETs (HEAD rides along) and its form posts.
-	mux.HandleFunc("GET "+pluginMountPrefix+"{name}/", s.pluginMount)
-	mux.HandleFunc("POST "+pluginMountPrefix+"{name}/", s.pluginMount)
+	rt.free("GET "+pluginMountPrefix+"{name}/", s.pluginMount)
+	rt.free("POST "+pluginMountPrefix+"{name}/", s.pluginMount)
 
-	api.New(s.cfg, &s.cfgMu, s.jobs, s.apiResolver, Version).Mount(mux)
-
-	// Middleware order, outermost first: logging, context (RLock), session,
-	// first-run gate, CSRF.
-	var h http.Handler = mux
-	h = s.CSRFMiddleware(h)
-	h = s.SetupMiddleware(h)
-	h = s.SessionMiddleware(h)
-	h = s.ContextMiddleware(h)
-	h = loggingMiddleware(h)
-
-	return h
+	// The API package registers on a mux of its own so its routes ride the
+	// read mode as a subtree instead of reaching past the modes. The methods
+	// are spelled out because a bare "/api/v1/" answers more of them than
+	// the catch-all "GET /" does, which the mux refuses as a conflict.
+	apiMux := http.NewServeMux()
+	api.New(s.cfgSnapshot, s.jobs, s.apiResolver, Version).Mount(apiMux)
+	for _, method := range []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"} {
+		rt.read(method+" /api/v1/", apiMux.ServeHTTP)
+	}
 }
 
 // allContexts lists every open gallery.
@@ -765,9 +724,9 @@ func (s *Server) allContexts() []*galleryCtx {
 func (s *Server) apiResolver(name string) (api.Gallery, bool) {
 	var cx *galleryCtx
 	if name == "" {
-		cx = s.Active()
+		cx = s.active()
 	} else {
-		cx = s.Get(name)
+		cx = s.get(name)
 	}
 	if cx == nil {
 		return api.Gallery{}, false
@@ -776,9 +735,7 @@ func (s *Server) apiResolver(name string) (api.Gallery, bool) {
 		Handle:           cx.Handle,
 		RelationsSvc:     cx.RelationsSvc,
 		InvalidateCaches: cx.InvalidateCaches,
-		RecordFetch:      func(id int64, state, msg string) { s.recordFetchStatus(cx.Name, id, state, msg) },
-		VisibleCount:     cx.VisibleCount,
-		TagCount:         cx.TagCount,
+		RecordFetch:      func(id int64, state, msg string) { s.fetchStatus.record(cx.Name, id, state, msg) },
 	}, true
 }
 
@@ -835,8 +792,9 @@ var DocURL = "https://monbooru.github.io/mondocs/index.html"
 var Variant = ""
 
 // Package names whatever produced this artifact ("docker", "tarball", "zip",
-// "installer", "flatpak"), injected at build time via -ldflags. With several
-// artifacts in circulation every bug report opens on the question it answers.
+// "installer", "flatpak", "appimage"), injected at build time via -ldflags.
+// With several artifacts in circulation every bug report opens on the
+// question it answers.
 // "source" is a plain go build and renders as nothing.
 var Package = "source"
 
@@ -883,10 +841,9 @@ type baseData struct {
 	DocURL      string
 	// Build is the artifact-and-provider stamp rendered beside the version;
 	// empty on a plain source build.
-	Build     string
-	CustomCSS bool
+	Build string
 	// Theme is true while an operator-installed theme resolves, gating the
-	// /theme.css link between the bundled sheet and the operator's own.
+	// /theme.css link that follows the bundled sheet.
 	Theme bool
 	// SidebarCollapsed hides the sidebar column on the layout's first paint.
 	// Rendered server-side so a navigation doesn't flash the column in and
@@ -897,12 +854,11 @@ type baseData struct {
 	// and the login screen so a deployment that wants a different name
 	// only edits monbooru.toml.
 	BooruName string
-	// BooruLogo is the resolved URL for the topbar logo: "/custom.logo"
-	// when server.logo is set, the active theme's "/theme.logo" when it
-	// ships one, the bundled logo.png otherwise.
-	// BooruFavicon is the same for the favicon <link>, minus the theme
-	// rung, falling back to the bundled favicon.png. A configured
-	// server.logo drives both; a theme only moves the topbar.
+	// BooruLogo is the resolved URL for the topbar logo: the active
+	// theme's "/theme.logo" when it ships one, the bundled logo.png
+	// otherwise. BooruFavicon is the same for the favicon <link>, taking
+	// the theme's "/theme.favicon" when it ships one. A theme moves each
+	// surface only through the file drawn for it.
 	BooruLogo    string
 	BooruFavicon string
 	// MonloaderURL is the browser-facing monloader base for the footer
@@ -984,7 +940,7 @@ func sidebarCollapsed(r *http.Request) bool {
 
 func (s *Server) base(r *http.Request, nav, title string) baseData {
 	sessID := sessionFromContext(r.Context())
-	cx := s.Active()
+	cx := s.active()
 	degraded := false
 	visible, inbox, tagCount, collectionsCount := 0, 0, 0, 0
 	if cx != nil {
@@ -1004,11 +960,11 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 	galleries := s.galleries()
 	active := readRatingCookie(r)
 	active = cmp.Or(active, "explicit")
-	conn, connVer, ptrReady, ptrSyncing, ptrContrib := s.monloaderStatusSeed()
+	ml := s.mlStatus.Seed()
 	if s.monloaderPaused() {
 		// A paused link renders as paused everywhere and hides the
 		// PTR-gated surfaces, regardless of the last probe's cache.
-		conn, connVer, ptrReady, ptrSyncing, ptrContrib = "paused", "", false, false, false
+		ml = monloader.Status{Conn: "paused"}
 	}
 	paired := s.pairedWith("monloader")
 	monloaderUsable := s.monloaderUsable()
@@ -1023,7 +979,6 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 		RepoURL:             RepoURL,
 		DocURL:              DocURL,
 		Build:               BuildLabel(),
-		CustomCSS:           s.customCSSPath() != "",
 		Theme:               themeSheet,
 		SidebarCollapsed:    sidebarCollapsed(r),
 		BooruName:           s.booruName(),
@@ -1032,12 +987,12 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 		MonloaderURL:        s.monloaderWebBase(),
 		MonloaderPaired:     paired,
 		MonloaderUsable:     monloaderUsable,
-		MonloaderConn:       conn,
-		MonloaderVersion:    connVer,
-		MonloaderPTR:        ptrReady,
-		MonloaderPTRSyncing: ptrSyncing,
-		MonloaderPTRPresent: paired && (ptrReady || ptrSyncing || !monloaderUsable),
-		MonloaderContrib:    ptrContrib,
+		MonloaderConn:       ml.Conn,
+		MonloaderVersion:    ml.Version,
+		MonloaderPTR:        ml.PTR,
+		MonloaderPTRSyncing: ml.PTRSyncing,
+		MonloaderPTRPresent: paired && (ml.PTR || ml.PTRSyncing || !monloaderUsable),
+		MonloaderContrib:    ml.Contrib,
 		ActiveGallery:       s.activeGallery(),
 		Galleries:           galleries,
 		VisibleCount:        visible,
@@ -1084,7 +1039,7 @@ func (s *Server) serveThumbnail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	cx := s.Get(r.PathValue("gallery"))
+	cx := s.get(r.PathValue("gallery"))
 	if cx == nil {
 		http.NotFound(w, r)
 		return
@@ -1108,15 +1063,12 @@ func (s *Server) serveThumbnail(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, fullPath)
 }
 
-// serveConfiguredFile serves an operator-supplied file (the
-// server.custom_css stylesheet, the server.logo logo/favicon). An empty
-// config 404s so the layout's gated <link> and the bundled-asset
-// fallbacks degrade cleanly when the knob is not set. Path scope is
-// enforced at config load (see customCSSPathAllowed) so any leak vector
-// is closed before this handler ever runs. The cache tag revalidates
-// against the file mtime so an edited file is picked up at once; a bare
-// Last-Modified would go heuristically stale until the operator
-// disabled the browser cache.
+// serveConfiguredFile serves one file of an installed theme off disk. An
+// empty path 404s so the layout's gated <link> and the bundled-asset
+// fallbacks degrade cleanly when the theme ships no such file. The cache
+// tag revalidates against the file mtime so an edited file is picked up at
+// once; a bare Last-Modified would go heuristically stale until the
+// operator disabled the browser cache.
 func (s *Server) serveConfiguredFile(w http.ResponseWriter, r *http.Request, path, kind string) {
 	if path == "" {
 		http.NotFound(w, r)
@@ -1124,14 +1076,6 @@ func (s *Server) serveConfiguredFile(w http.ResponseWriter, r *http.Request, pat
 	}
 	setGalleryScopedCache(w, "custom", kind, path)
 	http.ServeFile(w, r, path)
-}
-
-func (s *Server) serveCustomCSS(w http.ResponseWriter, r *http.Request) {
-	s.serveConfiguredFile(w, r, s.customCSSPath(), "css")
-}
-
-func (s *Server) serveCustomLogo(w http.ResponseWriter, r *http.Request) {
-	s.serveConfiguredFile(w, r, s.customLogoPath(), "logo")
 }
 
 // booruName resolves server.name with a "Monbooru" fallback so every
@@ -1179,7 +1123,55 @@ func (s *Server) sessionLifetimeDays() int {
 	return s.cfg.Auth.SessionLifetimeDays
 }
 
-func (s *Server) pageSize() int {
+// thumbSizeCookieName records the grid's cell-size step.
+const thumbSizeCookieName = "monbooru_thumb_size"
+
+// thumbSize reads the step for this request. "m" is the default and the
+// only one that renders no class; anything outside the closed set reads as
+// "m", so a stale cookie cannot leave the grid at a size nothing offers.
+func thumbSize(r *http.Request) string {
+	c, err := r.Cookie(thumbSizeCookieName)
+	if err != nil {
+		return "m"
+	}
+	switch c.Value {
+	case "s", "l":
+		return c.Value
+	}
+	return "m"
+}
+
+// pageSizeCookieName records a per-view page size. The gallery's Show
+// select writes it through viewPrefsPost; pageSize reads it back.
+const pageSizeCookieName = "monbooru_page_size"
+
+// PageSizeOptions is the closed set the Show select offers and the only
+// set the cookie is honoured for. ui.page_size stays the default; this is
+// the operator overriding it for the session's browsing, which is why it
+// is a cookie and not config.
+var PageSizeOptions = []int{20, 40, 60, 100, 250, 500}
+
+// pageSizeOverride is the per-browser size in force, or 0 when no cookie is
+// set. A value outside the offered set is dropped rather than clamped, so a
+// hand-edited cookie cannot ask for a page the budgets never covered.
+func pageSizeOverride(r *http.Request) int {
+	c, err := r.Cookie(pageSizeCookieName)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(c.Value)
+	if err != nil || !slices.Contains(PageSizeOptions, n) {
+		return 0
+	}
+	return n
+}
+
+// pageSize is the size of one listing page for this request: the browser's
+// own override, else the configured default.
+func (s *Server) pageSize(r *http.Request) int {
+	if n := pageSizeOverride(r); n > 0 {
+		return n
+	}
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	return s.cfg.UI.PageSize
@@ -1203,18 +1195,6 @@ func (s *Server) watcherSettings() (bool, int) {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	return s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB
-}
-
-func (s *Server) customCSSPath() string {
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
-	return s.cfg.Server.CustomCSS
-}
-
-func (s *Server) customLogoPath() string {
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
-	return s.cfg.Server.BooruLogo
 }
 
 func (s *Server) themeColor() string {
@@ -1241,14 +1221,19 @@ func (s *Server) executionProvider() string {
 	return s.cfg.Tagger.ExecutionProvider
 }
 
-// cfgSnapshot copies the config for the tagger package, which takes the
-// whole struct and reads it for the length of a job. The copy is shallow:
-// its slices are the live headers, read under the lock, and the settings
-// writers replace those slices rather than growing them in place.
+// cfgSnapshot copies the config for readers that hold it past the lock -
+// the tagger, which reads it for the length of a job, and the API layer,
+// which has no lock of its own. The four slices the settings writers edit
+// in place are cloned; everything they hold is replaced wholesale rather
+// than written through, so one level is enough.
 func (s *Server) cfgSnapshot() *config.Config {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	c := *s.cfg
+	c.Galleries = slices.Clone(c.Galleries)
+	c.Plugins = slices.Clone(c.Plugins)
+	c.Auth.Tokens = slices.Clone(c.Auth.Tokens)
+	c.Tagger.Taggers = slices.Clone(c.Tagger.Taggers)
 	return &c
 }
 
@@ -1264,39 +1249,46 @@ func (s *Server) galleries() []config.Gallery {
 	return out
 }
 
-// customLogoURL is the operator's server.logo override as a URL, empty
-// when the knob is unset. It outranks the active theme on every branded
-// surface: a config the operator wrote by hand beats one a theme folder
-// brought in.
-func (s *Server) customLogoURL() string {
-	if s.customLogoPath() != "" {
-		return "/custom.logo"
-	}
-	return ""
-}
-
-// booruLogoURL points the topbar logo at server.logo, else the active
-// theme's logo.png, else the bundled asset.
+// booruLogoURL points the topbar logo at the active theme's logo.png,
+// else the bundled asset.
 func (s *Server) booruLogoURL() string {
-	if url := s.customLogoURL(); url != "" {
-		return url
-	}
 	if s.activeTheme().Logo != "" {
 		return "/theme.logo"
 	}
 	return "/static/logo.png"
 }
 
-// booruFaviconURL is the same for the favicon (and, through it, the
-// manifest icon), except that a theme does not reach it: a theme's
-// logo.png is drawn for the topbar, and at 16px in a tab it reduces to
-// mush. Only server.logo - which the operator picked knowing both
-// surfaces use it - replaces the bundled icon.
+// booruFaviconURL is the same for the favicon. A theme's logo.png does not
+// reach it - it is drawn for the topbar and at 16px in a tab reduces to
+// mush - so a theme that wants the tab too ships the icon it wants drawn
+// there.
+//
+// The URL carries the file's version because a browser keeps favicons in a
+// store of its own rather than the page cache, and Firefox loads them with
+// revalidation off: on one fixed URL the first icon a profile saw is the
+// icon it keeps, so switching themes changed everything but the tab. A
+// version in the URL makes each icon a URL of its own. Nothing else linked
+// off a theme needs it - a stylesheet and an <img> revalidate normally.
 func (s *Server) booruFaviconURL() string {
-	if url := s.customLogoURL(); url != "" {
-		return url
+	e := s.activeTheme()
+	if e.Favicon == "" {
+		return "/static/favicon.png"
 	}
-	return "/static/favicon.png"
+	return "/theme.favicon?v=" + themeFaviconVersion(e)
+}
+
+// themeFaviconVersion identifies the active theme's tab icon: the file's
+// mtime for a copy on disk, which also moves when the operator edits it, and
+// the build for a built-in, whose files only change with the binary.
+func themeFaviconVersion(e themeEntry) string {
+	if e.Builtin {
+		return cmp.Or(Version, "builtin")
+	}
+	info, err := os.Stat(e.Favicon)
+	if err != nil {
+		return e.Name
+	}
+	return strconv.FormatInt(info.ModTime().UnixNano(), 10)
 }
 
 // monloaderWebBase is the browser-facing monloader base for the footer
@@ -1341,60 +1333,11 @@ func toUpperHex(c byte) byte {
 	return c
 }
 
-// customCSSPathAllowed gates the operator-supplied path to a small set
-// of trusted root directories. The intent is to catch a misconfigured
-// CustomCSS like "/etc/passwd" before /custom.css can leak it; legit
-// uses (a CSS file alongside the config or under /config or /data) all
-// pass without further setup. EvalSymlinks runs before the containment
-// check so a symlink under a trusted root that points at a file
-// outside (e.g. /config/style.css → /etc/passwd) fails the gate.
-func customCSSPathAllowed(cssPath, configPath string) bool {
-	if cssPath == "" {
-		return true
-	}
-	abs, err := filepath.Abs(cssPath)
-	if err != nil {
-		return false
-	}
-	// EvalSymlinks fails when the target doesn't exist yet; fall back
-	// to the cleaned absolute path in that case so operator misspellings
-	// still fail the file-serve below (rather than appearing to pass
-	// the gate because the symlink check errored).
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
-	}
-	roots := []string{"/config", "/data"}
-	if configPath != "" {
-		if cfgAbs, err := filepath.Abs(filepath.Dir(configPath)); err == nil {
-			roots = append(roots, cfgAbs)
-		}
-	}
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		// Evaluate symlinks on the root too so a containerised /config
-		// that resolves to /var/lib/monbooru/config still matches the
-		// resolved file path.
-		if resolved, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
-			root = resolved
-		}
-		rel, err := filepath.Rel(root, abs)
-		if err != nil {
-			continue
-		}
-		if rel != ".." && !strings.HasPrefix(rel, "../") {
-			return true
-		}
-	}
-	return false
-}
-
 // resolveMangaImage looks up a manga row's canonical_path. Returns
 // (path, true) when the row is a cbz; (_, false) for non-manga ids and
 // missing rows. Callers respond 404 on the false return.
 func (s *Server) resolveMangaImage(idStr string) (string, bool) {
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		return "", false
 	}
@@ -1482,7 +1425,7 @@ func (s *Server) serveImageView(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveImageBytes(w http.ResponseWriter, r *http.Request, scaled bool) {
 	idStr := r.PathValue("id")
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		http.NotFound(w, r)
 		return
@@ -1565,7 +1508,7 @@ func (s *Server) Close() {
 	default:
 		close(s.done)
 	}
-	s.pluginSupervisor.StopAll()
+	s.peers.StopAll()
 	tagger.ReleaseAll()
 	s.ctxMu.Lock()
 	defer s.ctxMu.Unlock()
@@ -1593,6 +1536,4 @@ func (s *Server) withConfig(fn func(*config.Config) error) error {
 // saveConfig persists the config as it stands, for callers that have
 // already made their edit. Returns any error so they can surface the
 // failure instead of leaving the in-memory cfg out of sync with disk.
-func (s *Server) saveConfig() error {
-	return s.withConfig(func(*config.Config) error { return nil })
-}
+func (s *Server) saveConfig() error { return s.withConfig(func(*config.Config) error { return nil }) }

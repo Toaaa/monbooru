@@ -47,9 +47,7 @@ var providerDisplayLabels = map[string]string{
 	"coremlv2": "CoreML V2",
 }
 
-func providerDisplayLabel(name string) string {
-	return cmp.Or(providerDisplayLabels[name], name)
-}
+func providerDisplayLabel(name string) string { return cmp.Or(providerDisplayLabels[name], name) }
 
 // settingsData is the /settings page. Galleries shadows the layout's list
 // with the richer per-gallery rows this page's table renders.
@@ -139,7 +137,7 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		Config:             s.cfgSnapshot(),
 		Taggers:            taggers,
 		TaggerRows:         taggerRows,
-		ScheduleStatus:     s.ScheduleStatus(),
+		ScheduleStatus:     s.scheduleStatus(),
 		Stats:              s.gatherStats(),
 		ExecutionProviders: executionProviderRows(),
 		ScheduleModes:      scheduleModeRows(),
@@ -184,12 +182,16 @@ func (s *Server) settingsSchedulePost(w http.ResponseWriter, r *http.Request) {
 		writeInlineFlash(w, "err", "Could not save: "+err.Error())
 		return
 	}
-	select {
-	case s.schedReload <- struct{}{}:
-	default:
-	}
+	s.sched.requestReload()
 	logx.Infof("settings: schedule updated (time=%s mode=%s)", timeVal, mode)
 	writeInlineFlash(w, "ok", "Saved.")
+	// The saved mode and time are what the next-run line reports, so it
+	// rides back with the flash rather than waiting for a reload to stop
+	// contradicting the form beside it.
+	s.renderTemplate(w, "partials/schedule_status.html", map[string]any{
+		"Status": s.scheduleStatus(),
+		"OOB":    true,
+	})
 }
 
 // settingsScheduleRunPost starts the nightly pass now. Useful on a container

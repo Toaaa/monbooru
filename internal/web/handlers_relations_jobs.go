@@ -21,7 +21,7 @@ func (s *Server) findRelationPairsPost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.DB == nil || cx.bkTree == nil {
 		flashStatus(w, http.StatusInternalServerError, "No active gallery.")
 		return
@@ -86,18 +86,16 @@ func (s *Server) resetSkippedPost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.DB == nil {
 		flashStatus(w, http.StatusInternalServerError, "No active gallery.")
 		return
 	}
-	res, err := cx.DB.Write.ExecContext(r.Context(),
-		`UPDATE potential_relation_pairs SET skipped_at = NULL WHERE skipped_at IS NOT NULL`)
+	n, err := cx.RelationsSvc.ResetSkipped(r.Context())
 	if err != nil {
 		logx.Warnf("reset skipped: %v", err)
 		flashStatus(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	n, _ := res.RowsAffected()
 	writeInlineFlash(w, "ok", fmt.Sprintf("Reset %d skipped pair(s).", n))
 }

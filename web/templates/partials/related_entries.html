@@ -1,8 +1,4 @@
 {{define "partials/related_entries.html"}}
-{{/* File-level duplicates that share this image's SHA-256 (same bytes
-     living at multiple paths on disk). Rendered above Related entries
-     and styled as a peer panel so the two headers read at the same
-     weight on the detail page. */}}
 {{if gt (len .ImagePaths) 1}}
 <div class="related-images duplicates-section">
   <h3>Duplicates</h3>
@@ -26,7 +22,8 @@
                 hx-target="closest .duplicates-entry"
                 hx-swap="outerHTML"
                 hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
-                hx-confirm="Delete this duplicate file from disk? The canonical path stays."
+                hx-confirm="Delete this duplicate file?"
+                data-confirm-danger="Its bytes are removed from disk. The canonical path stays."
                 data-confirm-ok="Delete">Delete</button>
         {{end}}
       </div>

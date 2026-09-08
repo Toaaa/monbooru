@@ -19,6 +19,7 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm644 lib/libonnxruntime.so.1.21.0 /app/bin/libonnxruntime.so
+      - install -Dm644 -t /app/share/licenses/onnxruntime LICENSE ThirdPartyNotices.txt
     sources:
       - type: archive
         only-arches: [x86_64]
@@ -34,6 +35,7 @@ modules:
     build-commands:
       - install -Dm755 bin/ffmpeg /app/bin/ffmpeg
       - install -Dm755 bin/ffprobe /app/bin/ffprobe
+      - install -Dm644 -t /app/share/licenses/ffmpeg licenses/*
     sources:
       - type: archive
         only-arches: [x86_64]
@@ -53,6 +55,7 @@ modules:
     build-commands:
       - |
         set -eu
+        export GOTOOLCHAIN=go$(awk '/^go /{print $2; exit}' go.mod)
         VERSION=$(tr -d '[:space:]' < VERSION.md)
         REPO=$(tr -d '[:space:]' < REPOSITORY.md)
         DOC=$(tr -d '[:space:]' < DOC.md)
@@ -69,10 +72,10 @@ modules:
           exit 1
         }
         RELEASE="<release version=\"${VERSION#v}\" date=\"$RELDATE\"/>"
-        sed -E "s|<release version=\"[^\"]*\" date=\"[^\"]*\"/>|$RELEASE|" \
+        sed "s|<!--RELEASE-->|$RELEASE|" \
           packaging/flatpak/io.github.monbooru.Monbooru.metainfo.xml > metainfo.xml
         grep -qF "$RELEASE" metainfo.xml || {
-          echo "no release entry in the metainfo to rewrite" >&2
+          echo "the metainfo has no <!--RELEASE--> marker to fill" >&2
           exit 1
         }
       - install -Dm755 monbooru /app/bin/monbooru

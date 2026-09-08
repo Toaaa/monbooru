@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,67 +39,80 @@ func fetchStatusKey(gallery string, id int64) string {
 	return gallery + "\x00" + strconv.FormatInt(id, 10)
 }
 
-// recordFetchStatus stores the latest fetch outcome for (gallery, id), pruning
+// fetchStatusStore is the last-known outcome of each image's source
+// metadata fetch. monloader runs the fetch asynchronously and calls the
+// enrich endpoint back; the detail page polls for the outcome so the tags
+// show up (or the failure surfaces) without a manual reload.
+type fetchStatusStore struct {
+	mu sync.Mutex
+	m  map[string]fetchStatusEntry
+}
+
+func newFetchStatusStore() *fetchStatusStore {
+	return &fetchStatusStore{m: map[string]fetchStatusEntry{}}
+}
+
+// record stores the latest fetch outcome for (gallery, id), pruning
 // entries past fetchStatusTTL first. A terminal report inherits the pending
 // entry's Hashes (monloader's callback doesn't know them); a fresh pending
 // resets them so a plain refetch never shows a stale hash line.
-func (s *Server) recordFetchStatus(gallery string, id int64, state, msg string) {
-	s.fetchStatusMu.Lock()
-	defer s.fetchStatusMu.Unlock()
+func (f *fetchStatusStore) record(gallery string, id int64, state, msg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	now := time.Now()
-	s.pruneFetchStatusLocked(now)
+	f.pruneLocked(now)
 	key := fetchStatusKey(gallery, id)
 	entry := fetchStatusEntry{State: state, Msg: msg, At: now}
-	if prev, ok := s.fetchStatus[key]; ok && state != "pending" {
+	if prev, ok := f.m[key]; ok && state != "pending" {
 		entry.Hashes = prev.Hashes
 	}
-	s.fetchStatus[key] = entry
+	f.m[key] = entry
 }
 
-// recordFetchLookup records the pending state for a hash lookup, remembering
+// recordLookup records the pending state for a hash lookup, remembering
 // the searched hashes so a not-found outcome can name them. Set before the
 // enqueue so a fast local (PTR) callback can't be overwritten back to pending.
-func (s *Server) recordFetchLookup(gallery string, id int64, hashes string) {
-	s.fetchStatusMu.Lock()
-	defer s.fetchStatusMu.Unlock()
+func (f *fetchStatusStore) recordLookup(gallery string, id int64, hashes string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	now := time.Now()
-	s.pruneFetchStatusLocked(now)
-	s.fetchStatus[fetchStatusKey(gallery, id)] = fetchStatusEntry{State: "pending", At: now, Hashes: hashes}
+	f.pruneLocked(now)
+	f.m[fetchStatusKey(gallery, id)] = fetchStatusEntry{State: "pending", At: now, Hashes: hashes}
 }
 
-// pruneFetchStatus evicts entries past the TTL. The recording paths
+// prune evicts entries past the TTL. The recording paths
 // prune as they write, so this is for the reclaim loop: once the last
 // fetch of a session lands, nothing writes again and the entries would
 // outlive their TTL until the next one does.
-func (s *Server) pruneFetchStatus() {
-	s.fetchStatusMu.Lock()
-	defer s.fetchStatusMu.Unlock()
-	s.pruneFetchStatusLocked(time.Now())
+func (f *fetchStatusStore) prune() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruneLocked(time.Now())
 }
 
-// pruneFetchStatusLocked initialises the map and evicts entries past the TTL.
-// Callers hold fetchStatusMu.
-func (s *Server) pruneFetchStatusLocked(now time.Time) {
-	if s.fetchStatus == nil {
-		s.fetchStatus = map[string]fetchStatusEntry{}
+// pruneLocked initialises the map and evicts entries past the TTL.
+// Callers hold f.mu.
+func (f *fetchStatusStore) pruneLocked(now time.Time) {
+	if f.m == nil {
+		f.m = map[string]fetchStatusEntry{}
 		return
 	}
-	maps.DeleteFunc(s.fetchStatus, func(_ string, e fetchStatusEntry) bool {
+	maps.DeleteFunc(f.m, func(_ string, e fetchStatusEntry) bool {
 		return now.Sub(e.At) > fetchStatusTTL
 	})
 }
 
-func (s *Server) loadFetchStatus(gallery string, id int64) (fetchStatusEntry, bool) {
-	s.fetchStatusMu.Lock()
-	defer s.fetchStatusMu.Unlock()
-	e, ok := s.fetchStatus[fetchStatusKey(gallery, id)]
+func (f *fetchStatusStore) load(gallery string, id int64) (fetchStatusEntry, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.m[fetchStatusKey(gallery, id)]
 	return e, ok
 }
 
-func (s *Server) clearFetchStatus(gallery string, id int64) {
-	s.fetchStatusMu.Lock()
-	defer s.fetchStatusMu.Unlock()
-	delete(s.fetchStatus, fetchStatusKey(gallery, id))
+func (f *fetchStatusStore) clear(gallery string, id int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.m, fetchStatusKey(gallery, id))
 }
 
 // writeFetchPending renders the "fetching..." pill into the target slot. Each
@@ -129,7 +143,7 @@ func (s *Server) fetchStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, _ := strconv.ParseInt(r.URL.Query().Get("n"), 10, 64)
-	e, ok := s.loadFetchStatus(s.activeGallery(), id)
+	e, ok := s.fetchStatus.load(s.activeGallery(), id)
 	if !ok {
 		// Nothing in flight (or already consumed): stop polling, clear the slot.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -145,7 +159,7 @@ func (s *Server) fetchStatusHandler(w http.ResponseWriter, r *http.Request) {
 	case "ok":
 		// The refresh reloads the page so the applied tags render; the flash
 		// rides the stash-and-show bridge to survive the reload.
-		s.clearFetchStatus(s.activeGallery(), id)
+		s.fetchStatus.clear(s.activeGallery(), id)
 		msg := e.Msg
 		msg = cmp.Or(msg, "Fetched tags from the source.")
 		setFlashHeader(w, msg, "ok", nil)
@@ -157,25 +171,25 @@ func (s *Server) fetchStatusHandler(w http.ResponseWriter, r *http.Request) {
 		// as a result, not an error. monloader's message is a "; "-joined
 		// per-source trail; render it as a list with the searched hashes
 		// recorded at enqueue time.
-		s.clearFetchStatus(s.activeGallery(), id)
+		s.fetchStatus.clear(s.activeGallery(), id)
 		writeFetchOutcome(w, "warn", lookupMissBody(e.Msg, e.Hashes))
 	case "canceled":
 		// monloader dropped the job before it ran - an operator cancel, or a
 		// restart draining its queue. Nothing was tried, so it reads as a
 		// standing state rather than a failure.
-		s.clearFetchStatus(s.activeGallery(), id)
+		s.fetchStatus.clear(s.activeGallery(), id)
 		writeFetchOutcome(w, "warn", "monloader dropped this job before it ran; nothing was looked up.")
 	case "already_exists":
 		// A replace found its original already in the library as another
 		// image; the pair was recorded as potential duplicates. A standing
 		// state the operator resolves in the dup workflow, not an error.
-		s.clearFetchStatus(s.activeGallery(), id)
+		s.fetchStatus.clear(s.activeGallery(), id)
 		writeFetchOutcome(w, "warn", alreadyExistsBody(e.Msg))
 	default:
 		// Any other state is terminal: a hash mismatch or apply error from
 		// enrich, or a code monloader reported for a fetch that failed before
 		// it could enrich. Surface it inline and stop polling.
-		s.clearFetchStatus(s.activeGallery(), id)
+		s.fetchStatus.clear(s.activeGallery(), id)
 		writeFetchOutcome(w, "err", html.EscapeString(fetchFailureMessage(e.State, e.Msg)))
 	}
 }

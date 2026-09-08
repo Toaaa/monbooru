@@ -11,9 +11,7 @@ import (
 
 // Importing the compatibility package here runs its providers' init()
 // functions, registering the per-application translators.
-func detectCompatFormat(files []*zip.File) string {
-	return compatibility.Detect(files)
-}
+func detectCompatFormat(files []*zip.File) string { return compatibility.Detect(files) }
 
 // replaceFromCompatArchive routes a foreign-format zip through the native
 // light-replacer path. format is propagated to ApplyLightReplace so the

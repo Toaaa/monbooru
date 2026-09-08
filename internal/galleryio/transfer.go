@@ -196,6 +196,11 @@ func transferProvenance(srcCx, dstCx gallery.Handle, srcID, dstID int64, note, o
 				return err
 			}
 		}
+		if src.CommentaryTranslated != "" && src.Site != "" {
+			if err := gallery.SetSourceCommentaryTranslated(dstCx.DB, dstID, src.Site, src.PostID, src.CommentaryTranslated); err != nil {
+				return err
+			}
+		}
 		if src.Original != "" && src.Site != "" {
 			if err := gallery.SetSourceOriginal(dstCx.DB, dstID, src.Site, src.PostID, src.Original); err != nil {
 				return err

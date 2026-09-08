@@ -37,7 +37,7 @@ var errAutotagOverCap = errors.New("autotag: search-scope cap reached")
 func (s *Server) spawnAutoTagJob(ids []int64, selected []tagger.TaggerStatus, logScope, itemNoun string) {
 	cfg := s.cfgSnapshot()
 	database := s.db()
-	cx := s.Active()
+	cx := s.active()
 	baseline := readVmRSS()
 	go func() {
 		ctx := s.jobs.Context()
@@ -94,7 +94,7 @@ func logAutotagPeak(scope string, baselineRSS uint64) {
 // uploadPost handles the multi-file form submit. Per-file size, tagging and
 // optional autotag-after-upload all flow through here.
 func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
-	if cx := s.Active(); cx == nil || cx.Degraded {
+	if cx := s.active(); cx == nil || cx.Degraded {
 		flashStatus(w, http.StatusServiceUnavailable, "Upload unavailable: gallery path is unreadable.")
 		return
 	}
@@ -152,6 +152,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 	var addedIDs []int64
 	var dupeIDs []int64
 	var tagWarnings []string
+	var refused, tooBig []string
 	added, dupes, oversized := 0, 0, 0
 	unsupported, unsaved, noPreview := 0, 0, 0
 	for _, fh := range files {
@@ -161,11 +162,13 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 		// would still slip through and stall thumbnail generation.
 		if maxBytes > 0 && fh.Size > maxBytes {
 			oversized++
+			tooBig = append(tooBig, fh.Filename)
 			continue
 		}
 		file, err := fh.Open()
 		if err != nil {
 			unsaved++
+			refused = append(refused, fh.Filename)
 			continue
 		}
 
@@ -174,6 +177,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			_ = file.Close()
 			unsaved++
+			refused = append(refused, fh.Filename)
 			continue
 		}
 
@@ -182,6 +186,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			_ = file.Close()
 			_ = os.Remove(dstPath)
 			unsaved++
+			refused = append(refused, fh.Filename)
 			continue
 		}
 		_ = dst.Close()
@@ -190,6 +195,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 		if _, ftErr := gallery.DetectFileType(dstPath); ftErr != nil {
 			_ = os.Remove(dstPath)
 			unsupported++
+			refused = append(refused, fh.Filename)
 			continue
 		}
 
@@ -207,6 +213,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			} else {
 				unsaved++
 			}
+			refused = append(refused, fh.Filename)
 			continue
 		}
 		if isDup {
@@ -257,7 +264,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			logx.Warnf("upload: stamp batch token: %v", err)
 		}
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 	}
 
 	// The flash carries links to the duplicate rows, so it is assembled
@@ -283,18 +290,23 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&msg, ", %d without a preview", noPreview)
 	}
 	if oversized > 0 {
-		fmt.Fprintf(&msg, ", %d skipped (exceeds %d MB)", oversized, maxFileSizeMB)
+		fmt.Fprintf(&msg, ", %d skipped over %d MB%s", oversized, maxFileSizeMB, namedFiles(tooBig))
 	}
 	failed := unsupported + unsaved
 	if failed > 0 {
-		fmt.Fprintf(&msg, ", %d error(s): %s", failed, uploadErrorReasons(unsupported, unsaved))
+		fmt.Fprintf(&msg, ", %d error(s): %s", failed, uploadErrorReasons(unsupported, unsaved, refused))
 	}
 	if len(tagWarnings) > 0 {
 		fmt.Fprintf(&msg, " (%d tag warning(s): %s)", len(tagWarnings), html.EscapeString(strings.Join(tagWarnings, "; ")))
 	}
-	cssClass := "flash-ok"
-	if added == 0 && (failed > 0 || oversized > 0) {
-		cssClass = "flash-err"
+	// A drop that lost files is not a clean run, so it never reads as one:
+	// err when nothing landed, warn when only some of it did.
+	kind := "ok"
+	switch {
+	case added == 0 && (failed > 0 || oversized > 0):
+		kind = "err"
+	case failed > 0 || oversized > 0:
+		kind = "warn"
 	}
 
 	// Optionally kick off auto-tagging on the newly uploaded images.
@@ -309,24 +321,37 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(&msg, ", auto-tagging %d image(s)", len(addedIDs))
 		}
 	}
-	kind := "ok"
-	if cssClass == "flash-err" {
-		kind = "err"
-	}
 	writeInlineFlashHTML(w, kind, msg.String())
+	// Every upload lands in the inbox, so the topbar counter moves with it.
+	_, _ = w.Write([]byte(s.inboxNavOOB(r)))
 }
 
-// uploadErrorReasons names why an upload's files failed. Grouping by
-// reason instead of listing files keeps the summary on one line whatever
-// the size of the drop.
-func uploadErrorReasons(unsupported, unsaved int) string {
-	if unsupported > 0 && unsaved > 0 {
-		return fmt.Sprintf("%d unsupported file type(s), %d could not be saved", unsupported, unsaved)
+// maxNamedRefusals is how many rejected files a summary line names before
+// it falls back to the count alone. A handful is what the operator needs to
+// find them again; a whole bad drop would push the flash past the one line
+// it is meant to stay on.
+const maxNamedRefusals = 3
+
+// namedFiles renders the parenthesised file list a refusal line carries,
+// and nothing at all once the list is too long to fit.
+func namedFiles(names []string) string {
+	if len(names) == 0 || len(names) > maxNamedRefusals {
+		return ""
 	}
-	if unsupported > 0 {
-		return "unsupported file type"
+	return " (" + html.EscapeString(strings.Join(names, ", ")) + ")"
+}
+
+// uploadErrorReasons names why an upload's files failed, and which ones
+// when few enough of them failed to fit.
+func uploadErrorReasons(unsupported, unsaved int, refused []string) string {
+	reason := "could not be saved"
+	switch {
+	case unsupported > 0 && unsaved > 0:
+		reason = fmt.Sprintf("%d unsupported file type(s), %d could not be saved", unsupported, unsaved)
+	case unsupported > 0:
+		reason = "unsupported file type"
 	}
-	return "could not be saved"
+	return reason + namedFiles(refused)
 }
 
 func (s *Server) autotagTrigger(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +383,7 @@ func (s *Server) autotagTrigger(w http.ResponseWriter, r *http.Request) {
 			hxErr(w, r, "Could not parse search: "+parseErr.Error(), parseErr.Error(), http.StatusBadRequest)
 			return
 		}
-		expr = resolveCeiling(r, s.Active()).Apply(expr)
+		expr = resolveCeiling(r, s.active()).Apply(expr)
 		// Hard ceiling so a clean-sweep autotag against an unbounded
 		// search doesn't materialise million-id slices plus the
 		// matching per-image frame-extraction state in tagger.RunWithTaggers.
@@ -439,7 +464,7 @@ func (s *Server) autotagImage(w http.ResponseWriter, r *http.Request) {
 	s.jobs.Update(0, 1, "starting (loading model may take a few seconds)…")
 
 	database := s.db()
-	cx := s.Active()
+	cx := s.active()
 	baseline := readVmRSS()
 	go func() {
 		// Force CPU inference for one-shot detail-page runs: spinning up the

@@ -39,8 +39,8 @@ func runHealthcheck(argv []string) {
 }
 
 // resolveHealthAddr picks the address to probe the same way the server picks
-// its bind address, but WITHOUT config.Load's side effect of rewriting the
-// TOML on every call (a healthcheck runs every interval).
+// its bind address, but WITHOUT config.LoadWithDefaults's side effect of
+// rewriting the TOML on every call (a healthcheck runs every interval).
 func resolveHealthAddr(configPath string) string {
 	addr := os.Getenv("MONBOORU_SERVER_BIND_ADDRESS")
 	if addr == "" && configPath != "" {

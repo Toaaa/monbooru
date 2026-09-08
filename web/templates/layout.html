@@ -6,7 +6,7 @@
   <script src="/static/htmx.min.js" defer></script>
   <script src="/static/main.js" defer></script>
 </head>
-<body>
+<body data-gallery="{{.ActiveGallery}}">
   <div id="topbar">
     <button id="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
     <a href="/" id="logo">
@@ -15,7 +15,7 @@
     </a>
     <nav id="nav">
       <a href="/" class="nav-images{{if and (eq .ActiveNav "gallery") (not .InboxNavActive)}} active{{end}}">Images</a>
-      <a id="inbox-nav" href="/?q=inbox:true" class="nav-inbox{{if .InboxNavActive}} active{{end}}">Inbox{{if gt .InboxCount 0}} ({{.InboxCount}}){{end}}</a>
+      <a id="inbox-nav" href="/?q=inbox:true" class="nav-inbox{{if .InboxNavActive}} active{{end}}">Inbox<span id="inbox-nav-count">{{if gt .InboxCount 0}} ({{.InboxCount}}){{end}}</span></a>
       <a href="/categories" class="nav-categories{{if eq .ActiveNav "categories"}} active{{end}}">Categories</a>
       <a href="/tags" class="nav-tags{{if eq .ActiveNav "tags"}} active{{end}}">Tags</a>
       <a href="/collections" class="nav-collections{{if eq .ActiveNav "collections"}} active{{end}}">Collections</a>
@@ -28,11 +28,6 @@
            hx-trigger="load, every 2s"
            hx-swap="outerHTML"></div>
       {{if not .Degraded}}
-      {{/* Sits before the form so its zero-width flex item doesn't push an
-           8px gap to the right of the sync button; the button ends up flush
-           with the topbar padding, matching the gallery grid's right edge.
-           The refusal bodies /internal/sync answers with are writeInlineFlash
-           fragments, already escaped server-side, so they swap in as markup. */}}
       <span id="sync-flash"></span>
       <form id="sync-form" hx-post="/internal/sync" hx-swap="none"
             hx-on:htmx:before-request="document.getElementById('job-status').innerHTML='<span class=&quot;job-running&quot;>syncing…</span>'"
@@ -86,14 +81,11 @@
       {{if .Degraded}}<span class="footer-sep">·</span><span class="footer-degraded">degraded</span>{{end}}
       <span class="footer-sep-strong">::</span>
       <span class="footer-rating-label">rating:</span>
-      {{$active := .ActiveRating}}{{$csrf := .CSRFToken}}{{range $i, $lv := .RatingLevels}}{{if $i}}<span class="footer-sep">·</span>{{end}}{{if eq $lv.Value $active}}<span class="footer-rating-active">[{{$lv.Label}}]</span>{{else}}<form hx-post="/internal/rating-ceiling?level={{$lv.Value}}" hx-swap="none" hx-on::after-request="window.location.reload()" style="display:inline"><input type="hidden" name="_csrf" value="{{$csrf}}"><button type="submit" class="footer-rating-link">{{$lv.Label}}</button></form>{{end}}{{end}}
-      {{/* {{with}} keeps the cell empty (and `:empty` CSS-hidden) on every
-           non-gallery surface where the handler flattens baseData into a
-           map without the HiddenByCeiling key. */}}
+      {{$active := .ActiveRating}}{{$csrf := .CSRFToken}}{{range $i, $lv := .RatingLevels}}{{if $i}}<span class="footer-sep">·</span>{{end}}{{if eq $lv.Value $active}}<span class="footer-rating-active">[{{$lv.Label}}]</span>{{else}}<form hx-post="/internal/rating-ceiling?level={{$lv.Value}}" hx-swap="none" hx-on::after-request="clearSelection(); window.location.reload()" style="display:inline"><input type="hidden" name="_csrf" value="{{$csrf}}"><button type="submit" class="footer-rating-link">{{$lv.Label}}</button></form>{{end}}{{end}}
       <span id="footer-hidden" class="footer-hidden">{{with .HiddenByCeiling}}<span class="footer-sep-strong">::</span>{{.}} hidden {{plural . "image" "images"}} in the current search{{end}}</span>
     </div>
     <div id="footer-right">
-      {{if .MonloaderPaired}}{{template "partials/monloader_light.html" .}} · {{end}}page loaded in <span id="page-load-ms">{{pageLoadMs .RequestStart}}</span> ms · <a href="{{.RepoURL}}" target="_blank" rel="noopener">monbooru{{if .Build}} ({{.Build}}){{end}}</a> {{.Version}} · <a href="#" id="footer-shortcuts" onclick="document.getElementById('shortcuts-help').showModal();return false">shortcuts</a> · <a href="{{.DocURL}}" target="_blank" rel="noopener">help</a> · <a href="/api/v1/docs" target="_blank" rel="noopener">API</a>
+      {{if .MonloaderPaired}}{{template "partials/monloader_light.html" .}} · {{end}}page loaded in <span id="page-load-ms">{{pageLoadMs .RequestStart}}</span> ms · <a href="{{.RepoURL}}" target="_blank" rel="noopener">monbooru{{if .Build}} ({{.Build}}){{end}}</a> {{.Version}} · <a href="#" id="footer-shortcuts" onclick="openShortcutSheet();return false">shortcuts</a> · <a href="{{.DocURL}}" target="_blank" rel="noopener">help</a> · <a href="/api/v1/docs" target="_blank" rel="noopener">API</a>
     </div>
   </footer>
   <dialog id="confirm-dialog">
@@ -110,179 +102,188 @@
     <div class="shortcuts-help-grid">
       <section data-surface="anywhere">
         <h4>Anywhere</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>?</kbd></td><td>Toggle this overlay</td></tr>
-            <tr><td><kbd>s</kbd> / <kbd>/</kbd></td><td>Focus search</td></tr>
-            <tr><td><kbd>b</kbd></td><td>Show / hide the sidebar</td></tr>
-            <tr><td><kbd>Esc</kbd></td><td>Close dialog · back</td></tr>
-            <tr><td><kbd>g g</kbd></td><td>Gallery</td></tr>
-            <tr><td><kbd>g i</kbd></td><td>Inbox</td></tr>
-            <tr><td><kbd>g c a</kbd></td><td>Categories</td></tr>
-            <tr><td><kbd>g c o</kbd></td><td>Collections</td></tr>
-            <tr><td><kbd>g t</kbd></td><td>Tags</td></tr>
-            <tr><td><kbd>g s</kbd></td><td>Settings</td></tr>
-            <tr><td><kbd>Y</kbd></td><td>Sync gallery</td></tr>
-            <tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>Rating ceiling switch</td></tr>
-            <tr><td><kbd>\</kbd></td><td>Switch gallery</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>?</kbd><span>Toggle this overlay</span></li>
+          <li><kbd>s</kbd><kbd>/</kbd><span>Focus search</span></li>
+          <li><kbd>b</kbd><span>Show / hide sidebar</span></li>
+          <li><kbd>Esc</kbd><span>Close dialog &middot; back</span></li>
+          <li><kbd>g</kbd><kbd>g</kbd><span>Gallery</span></li>
+          <li><kbd>g</kbd><kbd>i</kbd><span>Inbox</span></li>
+          <li><kbd>g</kbd><kbd>c</kbd><kbd>a</kbd><span>Categories</span></li>
+          <li><kbd>g</kbd><kbd>c</kbd><kbd>o</kbd><span>Collections</span></li>
+          <li><kbd>g</kbd><kbd>t</kbd><span>Tags</span></li>
+          <li><kbd>g</kbd><kbd>r</kbd><span>Relations</span></li>
+          <li><kbd>g</kbd><kbd>s</kbd><span>Settings</span></li>
+          <li data-when="form[hx-post=&#34;/internal/sync&#34;]"><kbd>Y</kbd><span>Sync gallery</span></li>
+          <li><kbd>,</kbd><kbd>.</kbd><span>Rating ceiling switch</span></li>
+          <li data-when="#gallery-switch-dialog"><kbd>\</kbd><span>Switch gallery</span></li>
+          <li data-when=".pagination"><kbd>[</kbd><kbd>]</kbd><span>Previous / next page</span></li>
+          <li data-when=".pagination"><kbd>G</kbd><span>Last page</span></li>
+          <li data-when=".pagination"><kbd>p</kbd><span>Page-jump dialog</span></li>
+        </ul>
       </section>
       <section data-surface="gallery">
         <h4>Gallery</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>↑ ↓ ← →</kbd> / <kbd>h j k l</kbd></td><td>Move grid cursor</td></tr>
-            <tr><td><kbd>Enter</kbd> / <kbd>o</kbd></td><td>Open focused image</td></tr>
-            <tr><td><kbd>Space</kbd></td><td>Toggle selection</td></tr>
-            <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>First / last visible</td></tr>
-            <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Previous / next page</td></tr>
-            <tr><td><kbd>g g</kbd> / <kbd>G</kbd></td><td>First / last page</td></tr>
-            <tr><td><kbd>p</kbd></td><td>Page-jump dialog</td></tr>
-            <tr><td><kbd>F</kbd></td><td>Toggle favorites filter</td></tr>
-            <tr><td><kbd>R</kbd></td><td>Random sort</td></tr>
-            <tr><td><kbd>O</kbd> / <kbd>D</kbd></td><td>Cycle sort / flip direction</td></tr>
-            <tr><td><kbd>a</kbd></td><td>Actions chooser</td></tr>
-            <tr><td><kbd>S</kbd></td><td>Save search dialog</td></tr>
-            <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>Select all visible</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd><span>Move grid cursor</span></li>
+          <li><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd><span>Move grid cursor</span></li>
+          <li><kbd>Enter</kbd><kbd>o</kbd><span>Open focused image</span></li>
+          <li><kbd>Space</kbd><span>Toggle selection</span></li>
+          <li><kbd>Drag</kbd><span>Rubber-band select</span></li>
+          <li><kbd>Alt</kbd>+<kbd>Drag</kbd><span>Rubber-band remove</span></li>
+          <li><kbd>Home</kbd><kbd>End</kbd><span>First / last visible</span></li>
+          <li><kbd>F</kbd><span>Toggle favorites filter</span></li>
+          <li><kbd>R</kbd><span>Random sort</span></li>
+          <li><kbd>O</kbd><span>Cycle sort</span></li>
+          <li><kbd>D</kbd><span>Flip direction</span></li>
+          <li data-when="#thumb-size-ramp"><kbd>-</kbd><kbd>=</kbd><span>Thumbnail size</span></li>
+          <li data-when="#select-mode-btn"><kbd>V</kbd><span>Select mode</span></li>
+          <li><kbd>S</kbd><span>Save search dialog</span></li>
+          <li><kbd>Ctrl</kbd>+<kbd>A</kbd><span>Select page</span></li>
+          <li data-when="#batch-select-all-matching:not([hidden])"><kbd>A</kbd><span>Select all matching</span></li>
+        </ul>
       </section>
       <section data-surface="selection">
         <h4>Selection active</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>a</kbd></td><td>Add tags</td></tr>
-            <tr><td><kbd>r</kbd></td><td>Remove tags</td></tr>
-            <tr><td><kbd>t</kbd></td><td>Auto-tag</td></tr>
-            <tr><td><kbd>m</kbd></td><td>Move</td></tr>
-            <tr><td><kbd>i</kbd></td><td>Toggle archive</td></tr>
-            <tr><td><kbd>f</kbd></td><td>Toggle favorite</td></tr>
-            <tr><td><kbd>L</kbd></td><td>Find tags (monloader)</td></tr>
-            <tr><td><kbd>Delete</kbd></td><td>Delete</td></tr>
-            <tr><td><kbd>Esc</kbd></td><td>Clear selection</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>a</kbd><span>Add tags</span></li>
+          <li><kbd>r</kbd><span>Remove tags</span></li>
+          <li data-when=".btn-autotag"><kbd>t</kbd><span>Auto-tag</span></li>
+          <li><kbd>m</kbd><span>Rename / move</span></li>
+          <li><kbd>i</kbd><span>Toggle archive</span></li>
+          <li><kbd>f</kbd><span>Toggle favorite</span></li>
+          <li><kbd>c</kbd><span>Set collection</span></li>
+          <li data-when="#batch-transfer"><kbd>T</kbd><span>Transfer</span></li>
+          <li data-when="#batch-invert"><kbd>I</kbd><span>Invert</span></li>
+          <li data-when="#batch-bar .monloader-accent"><kbd>L</kbd><span>Find tags (monloader)</span></li>
+          <li><kbd>Delete</kbd><span>Delete</span></li>
+          <li><kbd>Shift</kbd>+<kbd>click</kbd><span>Extend the selection</span></li>
+          <li data-when=".plugin-card .plugin-btn, #plugin-batch-bar.visible .plugin-btn"><kbd>x</kbd><kbd>1-9</kbd><span>Run Nth plugin</span></li>
+          <li><kbd>Esc</kbd><span>Clear selection</span></li>
+        </ul>
       </section>
       <section data-surface="detail">
         <h4>Image detail</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>← →</kbd> / <kbd>h l</kbd> / <kbd>j k</kbd></td><td>Previous / next</td></tr>
-            <tr><td><kbd>Esc</kbd> / <kbd>Backspace</kbd></td><td>Back to gallery</td></tr>
-            <tr><td><kbd>o</kbd></td><td>Open in tab</td></tr>
-            <tr><td><kbd>a</kbd></td><td>Focus tag input</td></tr>
-            <tr><td><kbd>r</kbd></td><td>Tag-focus mode</td></tr>
-            <tr><td><kbd>t</kbd></td><td>Auto-tag dialog</td></tr>
-            <tr><td><kbd>f</kbd> / <kbd>i</kbd></td><td>Toggle fav/inbox</td></tr>
-            <tr><td><kbd>m</kbd></td><td>Move dialog</td></tr>
-            <tr><td><kbd>Delete</kbd></td><td>Delete image</td></tr>
-            <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
-            <tr><td><kbd>e s</kbd></td><td>Edit Source</td></tr>
-            <tr><td><kbd>e c</kbd></td><td>Add to collection</td></tr>
-            <tr><td><kbd>e n</kbd></td><td>Edit Note</td></tr>
-            <tr><td><kbd>e 1</kbd>-<kbd>e 9</kbd></td><td>Edit Nth collection</td></tr>
-            <tr><td><kbd>L</kbd></td><td>Lookup online boorus</td></tr>
-            <tr><td><kbd>R</kbd></td><td>Open in reader</td></tr>
-            <tr><td><kbd>P</kbd></td><td>See all pages</td></tr>
-            <tr><td><kbd>v</kbd></td><td>Open image viewer</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>&larr;</kbd><kbd>&rarr;</kbd><kbd>h</kbd><kbd>l</kbd><kbd>j</kbd><kbd>k</kbd><span>Previous / next</span></li>
+          <li><kbd>Esc</kbd><kbd>Backspace</kbd><span>Back to gallery</span></li>
+          <li><kbd>o</kbd><span>Open in tab</span></li>
+          <li data-when=".detail-actions a[download]"><kbd>d</kbd><span>Download</span></li>
+          <li data-when=".tag-mode-toggle"><kbd>B</kbd><span>Group tags by...</span></li>
+          <li><kbd>a</kbd><span>Focus tag input</span></li>
+          <li><kbd>r</kbd><span>Tag-focus mode</span></li>
+          <li data-when=".btn-autotag"><kbd>t</kbd><span>Auto-tag dialog</span></li>
+          <li><kbd>f</kbd><kbd>i</kbd><span>Toggle fav / inbox</span></li>
+          <li><kbd>m</kbd><span>Rename / move dialog</span></li>
+          <li><kbd>Delete</kbd><span>Delete image</span></li>
+          <li data-when=".detail-video"><kbd>Space</kbd><span>Play / pause</span></li>
+          <li><kbd>e</kbd><kbd>s</kbd><span>Edit Source</span></li>
+          <li><kbd>e</kbd><kbd>c</kbd><span>Add to collection</span></li>
+          <li><kbd>e</kbd><kbd>n</kbd><span>Edit Note</span></li>
+          <li data-when=".btn-add-annotation"><kbd>e</kbd><kbd>a</kbd><span>Add annotation</span></li>
+          <li data-when="[data-relations-add]"><kbd>e</kbd><kbd>r</kbd><span>Add a relation</span></li>
+          <li data-when="#remove-tags-btn"><kbd>e</kbd><kbd>t</kbd><span>Remove tag(s)</span></li>
+          <li data-when="#transfer-image-btn"><kbd>e</kbd><kbd>g</kbd><span>Transfer gallery</span></li>
+          <li data-when=".btn-edit-collection"><kbd>e</kbd><kbd>1-9</kbd><span>Edit Nth collection</span></li>
+          <li data-when=".add-tag-form .btn-hash-lookup"><kbd>L</kbd><span>Lookup online boorus</span></li>
+          <li data-when=".btn-manga-action.btn-read"><kbd>R</kbd><span>Open in reader</span></li>
+          <li data-when=".btn-manga-action.btn-pages"><kbd>P</kbd><span>See all pages</span></li>
+          <li data-when=".btn-manga-action.btn-generate-collection"><kbd>C</kbd><span>Generate collection</span></li>
+          <li data-when=".plugin-card .plugin-btn, #plugin-batch-bar.visible .plugin-btn"><kbd>x</kbd><kbd>1-9</kbd><span>Run Nth plugin</span></li>
+          <li data-when=".detail-img-link"><kbd>v</kbd><span>Open image viewer</span></li>
+        </ul>
       </section>
       <section data-surface="lightbox">
         <h4>Image viewer</h4>
-        <table>
-          <tbody>
-            <tr><td>Click image / <kbd>v</kbd></td><td>Open viewer</td></tr>
-            <tr><td>Click background / <kbd>Esc</kbd></td><td>Close</td></tr>
-            <tr><td>Wheel</td><td>Zoom toward cursor</td></tr>
-            <tr><td>Drag</td><td>Pan</td></tr>
-            <tr><td>Double click</td><td>Toggle fit / 1:1</td></tr>
-            <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom in / out</td></tr>
-            <tr><td><kbd>0</kbd> / <kbd>1</kbd></td><td>Fit / 1:1</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>Wheel</kbd><span>Zoom toward cursor</span></li>
+          <li><kbd>Drag</kbd><span>Pan</span></li>
+          <li><kbd>Double click</kbd><span>Toggle fit / 1:1</span></li>
+          <li><kbd>+</kbd><kbd>-</kbd><span>Zoom in / out</span></li>
+          <li><kbd>0</kbd><kbd>1</kbd><span>Fit / 1:1</span></li>
+          <li><kbd>Esc</kbd><kbd>Click outside</kbd><span>Close</span></li>
+        </ul>
       </section>
       <section data-surface="tags">
         <h4>Tags page</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>s</kbd></td><td>Focus filter</td></tr>
-            <tr><td><kbd>n</kbd> / <kbd>N</kbd></td><td>New tag / alias</td></tr>
-            <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Page navigation</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>s</kbd><span>Focus filter</span></li>
+          <li data-when=".tag-row"><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>j</kbd><kbd>k</kbd><span>Move row cursor</span></li>
+          <li data-when=".tag-row"><kbd>Space</kbd><span>Toggle selection</span></li>
+          <li data-when=".tag-row"><kbd>Enter</kbd><span>Open the tag</span></li>
+          <li data-when="#tag-select-page"><kbd>Ctrl</kbd>+<kbd>A</kbd><span>Select page</span></li>
+          <li><kbd>n</kbd><kbd>N</kbd><span>New tag / alias</span></li>
+          <li data-when="#tag-batch-bar:not([hidden]) #btn-batch-category"><kbd>t</kbd><kbd>c</kbd><span>Change category</span></li>
+          <li data-when="#tag-batch-bar:not([hidden]) #btn-batch-merge"><kbd>t</kbd><kbd>m</kbd><span>Merge</span></li>
+          <li data-when="#tag-batch-bar:not([hidden]) #btn-batch-alias"><kbd>t</kbd><kbd>a</kbd><span>Alias to</span></li>
+          <li data-when="#tag-batch-bar:not([hidden]) #btn-batch-imply"><kbd>t</kbd><kbd>i</kbd><span>Imply</span></li>
+          <li data-when="#tag-batch-bar:not([hidden]) #btn-batch-merge-folded"><kbd>t</kbd><kbd>f</kbd><span>Merge folded</span></li>
+          <li data-when="#tag-batch-bar:not([hidden]) #btn-batch-ptr"><kbd>t</kbd><kbd>p</kbd><span>Find aliases (PTR)</span></li>
+          <li data-when="#tag-batch-bar:not([hidden]) #btn-batch-delete"><kbd>Delete</kbd><span>Delete selected</span></li>
+        </ul>
       </section>
       <section data-surface="tag-detail">
         <h4>Tag detail</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Previous / next tag</td></tr>
-            <tr><td><kbd>h</kbd> / <kbd>l</kbd></td><td>Previous / next tag</td></tr>
-            <tr><td><kbd>Esc</kbd> / <kbd>Backspace</kbd></td><td>Back to the tag listing</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>&larr;</kbd><kbd>&rarr;</kbd><kbd>h</kbd><kbd>l</kbd><span>Previous / next tag</span></li>
+          <li data-when="#btn-detail-rename"><kbd>t</kbd><kbd>r</kbd><span>Rename</span></li>
+          <li data-when="#btn-detail-category"><kbd>t</kbd><kbd>c</kbd><span>Change category</span></li>
+          <li data-when="#btn-detail-alias"><kbd>t</kbd><kbd>a</kbd><span>Alias / repoint</span></li>
+          <li data-when="#btn-detail-delete"><kbd>Delete</kbd><span>Delete tag</span></li>
+          <li><kbd>Esc</kbd><kbd>Backspace</kbd><span>Back to the listing</span></li>
+        </ul>
       </section>
       <section data-surface="categories">
         <h4>Categories page</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>n</kbd></td><td>Focus Add category</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>n</kbd><span>Focus Add category</span></li>
+        </ul>
       </section>
       <section data-surface="settings">
         <h4>Settings page</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>1</kbd>-<kbd>9</kbd> <kbd>0</kbd></td><td>Jump to section heading, in sidebar order</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>1-9</kbd><kbd>0</kbd><span>Jump to section</span></li>
+        </ul>
       </section>
       <section data-surface="reader">
         <h4>Manga reader</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>← →</kbd> / <kbd>h l</kbd> / <kbd>Space</kbd></td><td>Previous / next page</td></tr>
-            <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>First / last page</td></tr>
-            <tr><td><kbd>p</kbd></td><td>Jump to page</td></tr>
-            <tr><td><kbd>P</kbd></td><td>See all pages</td></tr>
-            <tr><td><kbd>o</kbd></td><td>Open page in new tab</td></tr>
-            <tr><td><kbd>e</kbd></td><td>Extract page as image</td></tr>
-            <tr><td>Click page / <kbd>v</kbd></td><td>Zoom page in viewer</td></tr>
-            <tr><td><kbd>Esc</kbd> / <kbd>Backspace</kbd></td><td>Back</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>&larr;</kbd><kbd>&rarr;</kbd><kbd>h</kbd><kbd>l</kbd><kbd>Space</kbd><span>Previous / next page</span></li>
+          <li><kbd>Home</kbd><kbd>End</kbd><span>First / last page</span></li>
+          <li><kbd>p</kbd><span>Jump to page</span></li>
+          <li><kbd>P</kbd><span>See all pages</span></li>
+          <li><kbd>o</kbd><span>Open page in new tab</span></li>
+          <li><kbd>e</kbd><span>Extract page as image</span></li>
+          <li><kbd>v</kbd><span>Zoom page in viewer</span></li>
+          <li><kbd>Esc</kbd><kbd>Backspace</kbd><span>Back</span></li>
+        </ul>
       </section>
       <section data-surface="pages">
         <h4>Archive pages grid</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>↑ ↓ ← →</kbd></td><td>Move grid cursor</td></tr>
-            <tr><td><kbd>Enter</kbd></td><td>Open focused page in the reader</td></tr>
-            <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>First / last cell</td></tr>
-            <tr><td><kbd>Esc</kbd> / <kbd>Backspace</kbd></td><td>Back to detail</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd><span>Move grid cursor</span></li>
+          <li><kbd>Enter</kbd><span>Open in the reader</span></li>
+          <li><kbd>Home</kbd><kbd>End</kbd><span>First / last cell</span></li>
+          <li><kbd>Esc</kbd><kbd>Backspace</kbd><span>Back to detail</span></li>
+        </ul>
       </section>
-      <section>
+      <section data-surface="relations">
         <h4>Relations session</h4>
-        <table>
-          <tbody>
-            <tr><td><kbd>1</kbd></td><td>Right is duplicate of left</td></tr>
-            <tr><td><kbd>2</kbd></td><td>Right is alternate of left</td></tr>
-            <tr><td><kbd>3</kbd></td><td>Right is newer version of left</td></tr>
-            <tr><td><kbd>4</kbd></td><td>Right is based on left</td></tr>
-            <tr><td><kbd>5</kbd></td><td>Not related</td></tr>
-            <tr><td><kbd>6</kbd> / <kbd>Space</kbd></td><td>Skip</td></tr>
-            <tr><td><kbd>W</kbd></td><td>Swap sides</td></tr>
-            <tr><td><kbd>C</kbd></td><td>Open compare slider</td></tr>
-            <tr><td><kbd>Esc</kbd></td><td>Back to Relations</td></tr>
-          </tbody>
-        </table>
+        <ul>
+          <li><kbd>1</kbd><span>Right duplicates left</span></li>
+          <li><kbd>2</kbd><span>Right is an alternate</span></li>
+          <li><kbd>3</kbd><span>Right is newer version</span></li>
+          <li><kbd>4</kbd><span>Right is based on left</span></li>
+          <li><kbd>5</kbd><span>Not related</span></li>
+          <li><kbd>6</kbd><kbd>Space</kbd><span>Skip</span></li>
+          <li><kbd>W</kbd><span>Swap sides</span></li>
+          <li><kbd>C</kbd><span>Open compare slider</span></li>
+          <li><kbd>Esc</kbd><span>Back to Relations</span></li>
+        </ul>
       </section>
     </div>
     <div class="dialog-actions">
+      <button type="button" id="shortcuts-all" class="btn-link-accent">[all surfaces]</button>
       <button type="button" onclick="document.getElementById('shortcuts-help').close()">Close</button>
     </div>
   </dialog>
@@ -292,10 +293,7 @@
       <div class="field">
         <input type="number" id="page-jump-input" name="page" min="1" required>
       </div>
-      <div class="dialog-actions">
-        <button type="submit">Go</button>
-        <button type="button" onclick="document.getElementById('page-jump-dialog').close()">Cancel</button>
-      </div>
+      {{template "dialog_actions" dict "ID" "page-jump-dialog" "Submit" "Go"}}
     </form>
   </dialog>
   {{template "partials/image_lightbox.html" .}}

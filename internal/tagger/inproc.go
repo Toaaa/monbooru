@@ -82,8 +82,8 @@ func init() {
 	// Default backend is the subprocess client: the parent never
 	// loads CUDA libraries or holds an ORT environment, so its RSS
 	// stays at the no-tagger baseline even after autotag jobs have
-	// run. MONBOORU_TAGGER_BACKEND=inproc is an undocumented
-	// rollback for operators who hit a subprocess regression.
+	// run. MONBOORU_TAGGER_BACKEND=inproc is the rollback for
+	// operators who hit a subprocess regression.
 	if os.Getenv("MONBOORU_TAGGER_BACKEND") == "inproc" {
 		SetBackend(defaultBackend)
 		return

@@ -34,10 +34,10 @@
                   hx-swap="outerHTML"
                   hx-headers='{"X-CSRF-Token":"{{$sb.CSRFToken}}"}'
                   {{if eq $sb.Mode "source"}}
-                  hx-confirm="Drop {{.Name}} from the {{.DeleteCount}} tags it applied?{{if .DeleteShared}} {{.DeleteShared}} that another source also vouches for stay on the image.{{end}}"
+                  hx-confirm="Drop {{.Name}} from the {{.DeleteCount}} {{plural .DeleteCount "tag" "tags"}} it applied?{{if .DeleteShared}} {{.DeleteShared}} that another source also vouches for stay on the image.{{end}}"
                   title="Withdraw {{.Name}} from this image's tags"
                   {{else}}
-                  hx-confirm="Remove the {{.DeleteCount}} {{.Name}} tags on this image?"
+                  hx-confirm="Remove the {{.DeleteCount}} {{.Name}} {{plural .DeleteCount "tag" "tags"}} on this image?"
                   title="Remove every {{.Name}} tag on this image"
                   {{end}}
                   data-confirm-ok="{{if eq $sb.Mode "source"}}Drop{{else}}Remove{{end}}">[x]</button>
@@ -52,7 +52,6 @@
                title="{{.NameHint}}">{{.TagName}}</a>
             {{if .Marker}}<span class="tag-marker tag-marker-{{.MarkerKind}}"{{if .MarkerHint}} title="{{.MarkerHint}}"{{end}}>{{.Marker}}</span>{{end}}
             <span class="tag-count" title="{{.UsageCount}} images in the library with this tag">{{abbrevCount .UsageCount}}</span>
-            {{/* Last so the DOM order matches the visual one; the CSS lifts it over the count. */}}
             {{if .Removable}}
             <button type="button" class="tag-entry-remove"
                     hx-delete="{{.RemoveURL}}"
@@ -84,11 +83,6 @@
   {{end}}
   {{end}}
 
-  {{/* Folder tree, source filters, and saved searches. Lazy-loaded so the
-       folder-tree aggregation doesn't block first paint - same pattern the
-       gallery sidebar uses, including dropping the load trigger while the
-       column is collapsed. BackQuery drives active-state highlighting when
-       the detail page was reached with gallery context. */}}
   <div id="detail-sidebar-browse"
        hx-get="/internal/sidebar-browse?q={{urlQ .BackQuery}}"
        hx-trigger="{{if .SidebarCollapsed}}sidebar-shown from:body{{else}}load{{end}}"

@@ -180,9 +180,7 @@ button.footer-rating-link:hover { color: var(--fg); }
   flex-wrap: wrap;
   flex-shrink: 0;
 }
-/* One optional hue per nav entry. An unset --nav-* leaves --nav-hue
-   guaranteed-invalid, so every var() below falls through to the shipped
-   value and the default look is unchanged. */
+
 #nav a.nav-images      { --nav-hue: var(--nav-images); }
 #nav a.nav-inbox       { --nav-hue: var(--nav-inbox); }
 #nav a.nav-categories  { --nav-hue: var(--nav-categories); }
@@ -267,8 +265,7 @@ button.footer-rating-link:hover { color: var(--fg); }
   border-right: 1px solid var(--border);
   overflow-y: auto;
   padding: 8px 0 8px 4px;
-  /* Reserve the scrollbar's own column (and force it off overlay) so the
-     right-aligned section chevrons never sit under it. */
+
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
@@ -382,11 +379,12 @@ button.footer-rating-link:hover { color: var(--fg); }
   cursor: pointer;
   font-size: 10px;
 }
-.tag-list-sidebar { list-style: none; margin: 0; padding: 0 0 0 4px; }
+.tag-list-sidebar, .folder-tree { list-style: none; margin: 0; padding: 0 0 0 4px; }
 .tag-link { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 
 /* Folder tree section */
-#folder-tree-section, #saved-searches-section, #source-labels-section {
+#folder-tree-section, #saved-searches-section, #source-labels-section,
+#tags-section + #detail-sidebar-browse {
   border-top: 1px solid var(--border);
   margin-top: 8px;
   padding-top: 4px;
@@ -397,20 +395,12 @@ button.footer-rating-link:hover { color: var(--fg); }
   margin-top: 0;
   padding-top: 0;
 }
-/* Detail browse sections lazy-load into their own wrapper, so the first one
-   drops its :first-child divider; restore it under the per-image tags. */
-#tags-section + #detail-sidebar-browse {
-  border-top: 1px solid var(--border);
-  margin-top: 8px;
-  padding-top: 4px;
-}
 .sidebar-section-header {
   display: flex;
   align-items: baseline;
   gap: var(--row-gap);
   padding: 3px var(--row-inset-end) 3px var(--row-inset);
 }
-.folder-tree { list-style: none; margin: 0; padding: 0 0 0 4px; }
 .folder-children { list-style: none; margin: 0; padding: 0 0 0 12px; }
 .folder-toggle-btn[data-path] {
   width: 12px;
@@ -461,6 +451,7 @@ button.footer-rating-link:hover { color: var(--fg); }
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
   margin-bottom: 12px;
 }
 #search-form {
@@ -508,8 +499,27 @@ button.footer-rating-link:hover { color: var(--fg); }
 }
 #gallery-header #search-input { padding-left: 26px; }
 .result-count { color: var(--fg); }
+#batch-count { color: var(--fg); }
 #save-search-area { flex-shrink: 0; }
 
+.status-bar-push { flex: 1; }
+.view-pref { display: flex; align-items: center; gap: 6px; }
+.pref-ramp button { height: 20px; box-sizing: border-box; }
+#select-mode-btn[aria-pressed="true"],
+.pref-ramp button[aria-pressed="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.pref-ramp { display: inline-flex; }
+.pref-ramp button {
+  padding: 2px 7px 0;
+  border-right-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pref-ramp button:last-child { border-right-width: 1px; }
+/* Coarse pointers get 16px form fields, which need a taller row. */
+@media (pointer: coarse) {
+  .pref-ramp button { height: 28px; }
+}
 .status-bar {
   font-size: 12px;
   color: var(--fg-dim);
@@ -518,16 +528,30 @@ button.footer-rating-link:hover { color: var(--fg); }
   margin-bottom: 12px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
 }
 
 .thumb-card.focused { border-color: var(--accent); outline: 4px solid var(--accent); outline-offset: -2px; }
 
 .thumb-grid {
+  --thumb-max: 180px;
+  position: relative;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(clamp(140px, (100% - 16px) / 3, 180px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(clamp(140px, (100% - 16px) / 3, var(--thumb-max)), 1fr));
   gap: 8px;
 }
+.thumb-grid.thumb-sm { --thumb-max: 140px; }
+.thumb-grid.thumb-lg { --thumb-max: 260px; }
+
+.marquee {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+body.marquee-active { user-select: none; }
 
 .thumb-cluster-header {
   grid-column: 1 / -1;
@@ -633,7 +657,7 @@ button.footer-rating-link:hover { color: var(--fg); }
   height: 12px;
   fill: currentColor;
 }
-.badge-inbox { font-size: 10px; line-height: 1; width: auto; }
+.badge-inbox, .badge-filesize { font-size: 10px; line-height: 1; width: auto; }
 .fav-heart { color: var(--fav); }
 .badge-missing { color: var(--warning); }
 .badge-video {
@@ -649,11 +673,6 @@ button.footer-rating-link:hover { color: var(--fg); }
   border-bottom: 6px solid transparent;
   border-left: 9px solid currentColor;
   margin-left: 1px;
-}
-.badge-filesize {
-  font-size: 10px;
-  line-height: 1;
-  width: auto;
 }
 
 .badge-similarity {
@@ -686,75 +705,67 @@ button.footer-rating-link:hover { color: var(--fg); }
 }
 .pagination button.page-jump {
   background: transparent;
-  font: inherit;
+  font-family: inherit;
+  font-size: inherit;
   cursor: pointer;
 }
 .pagination a:hover, .pagination button.page-jump:hover { border-color: var(--accent); text-decoration: none; }
 .pagination .current { border-color: var(--accent); color: var(--link); }
+.pagination-top { margin-top: 0; margin-bottom: 12px; }
 
 /* Batch action bar */
+#batch-bars {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+}
 #batch-bar {
-  display: none;
-  gap: 8px;
+  display: flex;
+  gap: 6px;
   align-items: center;
   flex-wrap: wrap;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
+  padding: 8px 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--fg-dim);
   margin-bottom: 12px;
 }
-#batch-bar button { white-space: nowrap; flex-shrink: 0; }
-#batch-bar .btn-autotag { padding: 4px 8px; font-size: inherit; line-height: normal; }
+#batch-bar[hidden] { display: none; }
+#batch-bar button { white-space: nowrap; flex-shrink: 0; padding: 4px 6px; }
+#batch-bar .btn-autotag { font-size: inherit; line-height: normal; }
 #batch-bar .monloader-accent { border-color: var(--monloader); background: var(--bg-surface); }
 #batch-bar .monloader-accent:hover { color: var(--bg); background: var(--monloader); border-color: var(--monloader); }
-#batch-bar.visible { display: flex; }
+#batch-bar:not(.visible) #batch-cancel,
+#batch-bar:not(.visible) #batch-delete-form > button {
+  opacity: 0.45;
+  pointer-events: none;
+}
+/* Same rail on the right as the bar above it; the plugin rule on the left is
+   what the inset there is for. */
 #plugin-batch-bar {
-  display: none;
+  display: flex;
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-  padding: 6px 10px;
+  padding: 6px 0 6px 10px;
   margin-bottom: 12px;
-  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   border-left: 3px solid var(--plugin);
 }
-#plugin-batch-bar.visible { display: flex; }
+#plugin-batch-bar[hidden] { display: none; }
+#plugin-batch-bar:not(.visible) .plugin-row {
+  opacity: 0.45;
+  pointer-events: none;
+}
 #batch-delete-form { display: contents; }
 .batch-bar-spacer { flex: 1; }
-.batch-bar-sep { display: inline-block; width: 1px; height: 22px; background: var(--fg-dim); margin: 0 12px; align-self: center; flex-shrink: 0; }
+.batch-bar-sep { display: inline-block; width: 1px; height: 22px; background: var(--fg-dim); margin: 0 6px; align-self: center; flex-shrink: 0; }
 @media (max-width: 900px) {
   .batch-bar-spacer,
   .batch-bar-sep { flex-basis: 100%; height: 0; overflow: hidden; margin: 0; }
 }
-
-.actions-menu { list-style: none; margin: 0 0 12px 0; padding: 0; min-width: 320px; }
-.actions-menu-item { margin: 0; }
-.actions-menu-item button {
-  display: block; width: 100%; text-align: left;
-  padding: 6px 10px; font: inherit; line-height: 1.4; cursor: pointer;
-}
-.actions-menu-item button:not(.btn-danger) {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-}
-.actions-menu-item button:not(.btn-autotag):not(.btn-danger):not(.monloader-accent) { color: var(--fg); }
-.actions-menu-item button.btn-autotag { color: var(--tagger); }
-.actions-menu-item button.monloader-accent { color: var(--monloader); }
-.actions-menu-item button:disabled { color: var(--fg-dim); }
-.actions-menu-item button:focus { outline: none; }
-.actions-menu-item button:not(.btn-autotag):not(.btn-danger):not(.monloader-accent):hover,
-.actions-menu-item button:not(.btn-autotag):not(.btn-danger):not(.monloader-accent):focus { border-color: var(--fg-dim); }
-.actions-menu-item button.btn-autotag:hover,
-.actions-menu-item button.btn-autotag:focus {
-  background: var(--tagger); color: var(--bg); border-color: var(--tagger);
-}
-.actions-menu-item button.monloader-accent:hover,
-.actions-menu-item button.monloader-accent:focus {
-  background: var(--monloader); color: var(--bg); border-color: var(--monloader);
-}
-.actions-menu-item button:disabled:hover, .actions-menu-item button:disabled:focus {
-  background: var(--bg-surface); color: var(--fg-dim); border-color: var(--border);
-}
-.actions-menu-sep { height: 1px; background: var(--border); margin: 6px 0; }
 
 /* Detail page */
 .detail-main {
@@ -881,7 +892,8 @@ details summary:hover { color: var(--fg); }
 .tag-date { color: var(--fg-dim); font-size: 12px; white-space: nowrap; }
 .tag-name-cell a { text-decoration: none; }
 .tag-name-cell a:hover { text-decoration: underline; }
-.tag-table .tag-name-cell { min-width: 160px; }
+.tag-row.focused { outline: 1px solid var(--accent); outline-offset: -1px; }
+.tag-table .tag-name-cell { min-width: 160px; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-table .tag-name-builtin { white-space: nowrap; }
 .tag-select-col { width: 26px; text-align: center; }
 .tag-table th:nth-child(4), .tag-table td:nth-child(4) { width: 110px; }
@@ -1044,24 +1056,21 @@ details summary:hover { color: var(--fg); }
 .field { margin-bottom: 8px; }
 .field label { display: block; font-size: 12px; color: var(--fg-dim); margin-bottom: 2px; }
 .radio-row { display: flex; gap: 16px; }
-.radio-row label { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 0; }
+.radio-row label, .radio-grid label { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 0; }
 .radio-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 16px; }
-.radio-grid label { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 0; }
 .field input[type="text"], .field input[type="number"], .field input[type="password"] { width: 100%; max-width: 300px; }
 dialog .field input[type="text"], dialog .field input[type="number"] { max-width: 360px; }
 dialog .series-input-wrap { max-width: 360px; }
 
 #settings-page .field { margin-bottom: 16px; }
-#settings-page .schedule-grid .field { margin-bottom: 0; } /* grid spaces via gap */
+#settings-page .schedule-grid .field { margin-bottom: 0; }
 #settings-page .field > label { color: var(--fg); }
 #settings-page .field > label.monloader-accent { color: var(--monloader); }
 #settings-page .field > label.tagger-accent { color: var(--tagger); }
-/* A setting whose companion is paired but currently unreachable stays
-   editable - the phase resumes on its own - and only reads as off. */
+
 #settings-page .field > label.label-off { color: var(--fg-dim); }
 #settings-page .field-hint:not([hidden]) { display: block; margin: 3px 0 0; }
-/* Hairline between stacked fields; the child combinator skips the flex-row
-   (settings-cols) and grid (schedule) layouts so a rule never lands in a row. */
+
 #settings-page .settings-sub > .field { margin-bottom: 12px; }
 #settings-page .settings-sub > .field + .field { border-top: 1px solid var(--border); padding-top: 12px; }
 .settings-sub-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
@@ -1079,14 +1088,18 @@ kbd {
   font-size: 12px;
 }
 
-#shortcuts-help { width: min(1400px, 95vw); }
-#shortcuts-help h3 { margin: 0 0 6px 0; font-size: 13px; }
-#shortcuts-help h4 { margin: 0 0 2px 0; font-size: 11px; color: var(--fg-dim); font-weight: normal; text-transform: uppercase; letter-spacing: 0.05em; }
-.shortcuts-help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px 24px; font-size: 12px; line-height: 1.35; }
+#shortcuts-help { width: min(1000px, 92vw); max-height: calc(100vh - 4rem); }
+#shortcuts-help h3 { margin: 0 0 8px 0; font-size: 13px; }
+#shortcuts-help h4 { margin: 0 0 3px 0; font-size: 11px; color: var(--fg-dim); font-weight: normal; text-transform: uppercase; letter-spacing: 0.05em; }
+.shortcuts-help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); gap: 12px 28px; font-size: 12px; line-height: 1.45; align-items: start; }
 .shortcuts-help-grid section { break-inside: avoid; }
-.shortcuts-help-grid table { border-collapse: collapse; width: 100%; }
-.shortcuts-help-grid td { padding: 0 6px 0 0; vertical-align: top; }
-.shortcuts-help-grid td:first-child { white-space: nowrap; color: var(--fg-dim); }
+.shortcuts-help-grid ul { list-style: none; }
+/* One flowed line per binding. A table column is as wide as the section's
+   widest key cell, which leaves a single-key row too little for its label. */
+.shortcuts-help-grid li { display: flex; align-items: baseline; gap: 3px; white-space: nowrap; color: var(--fg-dim); }
+.shortcuts-help-grid li[hidden] { display: none; }
+.shortcuts-help-grid li kbd { flex: none; padding: 0 4px; }
+.shortcuts-help-grid li span { margin-left: 3px; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 
 .chord-leader-hint {
   position: fixed;
@@ -1143,6 +1156,8 @@ dialog p { margin-bottom: 16px; }
 #rename-dialog, #delete-tags-search-dialog, #ptr-lookup-search-dialog,
 #detail-category-dialog, #detail-alias-dialog { max-width: 440px; }
 
+#batch-place-dialog, #place-image-dialog { width: min(720px, 100% - 2rem); }
+
 #tag-create-dialog .field select,
 #alias-create-dialog .field select { width: 100%; max-width: 360px; }
 
@@ -1152,10 +1167,12 @@ dialog p { margin-bottom: 16px; }
 #source-dialog .field input[type="url"],
 #source-dialog .series-input-wrap { width: 100%; max-width: none; }
 
-/* Commentary edit dialog: same full-width fields as the source dialog. */
-#commentary-dialog { min-width: 0; width: min(480px, 100% - 2rem); }
+/* Commentary and translation edit dialogs: same full-width fields as the
+   source dialog, and wide enough for the format bar to stay on one line. */
+#commentary-dialog, #translation-dialog { min-width: 0; width: min(520px, 100% - 2rem); }
 #commentary-dialog .field input[type="text"],
-#commentary-dialog .field textarea { width: 100%; max-width: none; }
+#commentary-dialog .field textarea,
+#translation-dialog .field textarea { width: 100%; max-width: none; }
 
 #original-dialog { min-width: 0; width: min(480px, 100% - 2rem); }
 #original-dialog .field textarea { width: 100%; max-width: none; height: 2.2em; }
@@ -1223,8 +1240,7 @@ dialog p { margin-bottom: 16px; }
   align-items: center;
   gap: 8px;
 }
-/* Same width as .detail-meta-col: prev/next and the actions land on the
-   metadata panel's edges, so the two widths move together. */
+
 .detail-topbar-right {
   width: 420px;
   flex-shrink: 0;
@@ -1297,8 +1313,7 @@ dialog p { margin-bottom: 16px; }
   width: 26px;
   padding: 2px 0;
 }
-.btn-fav:hover { color: var(--fav); border-color: var(--fav); }
-.btn-fav.active { color: var(--fav); border-color: var(--fav); }
+.btn-fav:hover, .btn-fav.active { color: var(--fav); border-color: var(--fav); }
 .btn-inbox:hover { color: var(--fg); border-color: var(--fg-dim); }
 .btn-inbox.active { color: var(--fg); border-color: var(--accent); }
 
@@ -1317,9 +1332,7 @@ dialog p { margin-bottom: 16px; }
   max-width: 100%;
   display: inline-block;
 }
-/* 430px is the fixed height of the bars above the image and the editor
-   below it, annotation toggle included, so both stay on screen without
-   scrolling. */
+
 .detail-img, .detail-video { max-height: max(45vh, calc(100vh - 430px)); }
 
 .detail-media-frame {
@@ -1408,7 +1421,8 @@ dialog p { margin-bottom: 16px; }
 }
 .annotation-coord-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .annotation-coord-row input { width: 100%; min-width: 0; }
-#annotation-dialog .field textarea { width: 100%; }
+#annotation-dialog .field textarea,
+#note-dialog .field textarea { width: 100%; }
 
 .mono-small { font-size: 11px; }
 .sha-truncated { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: baseline; }
@@ -1500,10 +1514,7 @@ a.btn-sm:hover { text-decoration: none; }
   text-decoration: none;
 }
 .btn-link-accent:hover { text-decoration: underline; }
-/* Reserved accent for controls that talk to monloader (fetch-from-source),
-   so the operator reads them at a glance as "this reaches out over the LAN". */
 .monloader-accent { color: var(--monloader); }
-/* The same idea for controls that drive the auto-tagger. */
 .tagger-accent { color: var(--tagger); }
 .fetch-status:empty { display: none; }
 
@@ -1599,6 +1610,7 @@ a.btn-sm:hover { text-decoration: none; }
 .series-input-wrap input { width: 100%; }
 .suggest-dropdown.series-suggest-dropdown,
 .suggest-dropdown.tag-suggest-dropdown,
+.suggest-dropdown.folder-suggest-dropdown,
 #search-suggest {
   position: absolute;
   top: 100%;
@@ -1609,6 +1621,7 @@ a.btn-sm:hover { text-decoration: none; }
 #search-suggest { z-index: 100; }
 .series-suggest-dropdown .suggest-list,
 .tag-suggest-dropdown .suggest-list,
+.folder-suggest-dropdown .suggest-list,
 #search-suggest .suggest-list {
   position: static;
   width: 100%;
@@ -1633,18 +1646,30 @@ a.btn-sm:hover { text-decoration: none; }
   color: var(--fg-dim);
 }
 .name-preview-cap { display: block; font-size: 10px; color: var(--fg-dim); }
-.name-preview-row { display: block; overflow-wrap: anywhere; }
+.name-preview-note { display: block; font-size: 10px; color: var(--warning); }
+.name-preview-rows { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); column-gap: 10px; align-items: start; }
+.name-preview-from { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-preview-to { color: var(--success); overflow-wrap: anywhere; }
+.name-preview-to::before { content: "-> "; color: var(--fg-dim); }
+.name-preview-more {
+  margin-top: 4px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-bottom: 1px dotted var(--fg-dim);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.name-preview-more:hover { color: var(--fg); border-bottom-color: var(--fg); }
 .name-preview-field { color: var(--fg-dim); }
 
 .dest-row { display: flex; align-items: flex-end; gap: 6px; flex-wrap: wrap; }
-.dest-row .dest-part { flex: 1 1 190px; min-width: 0; }
+.dest-row .dest-part { flex: 1 1 190px; min-width: 0; position: relative; }
 .dest-row input[type="text"] { width: 100%; max-width: none; }
 .dest-part > label { display: block; font-size: 11px; color: var(--fg-dim); margin-bottom: 3px; }
 .dest-sep { color: var(--fg-dim); padding-bottom: 4px; }
 .dest-hints { display: flex; gap: 6px; flex-wrap: wrap; }
 .dest-hints > .field-hint { flex: 1 1 190px; }
-.name-preview-arrow { color: var(--fg-dim); }
-.name-preview-to { color: var(--success); }
 .name-preview-err { margin-top: 6px; font-size: 12px; color: var(--error); }
 
 .suggest-dropdown {
@@ -1660,7 +1685,13 @@ a.btn-sm:hover { text-decoration: none; }
   min-width: 220px;
   max-height: 200px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
+.suggest-list::-webkit-scrollbar { width: 8px; }
+.suggest-list::-webkit-scrollbar-thumb { background: var(--border); }
+.suggest-list::-webkit-scrollbar-track { background: transparent; }
 .suggest-item {
   display: flex;
   align-items: center;
@@ -1830,6 +1861,14 @@ a.btn-sm:hover { text-decoration: none; }
 .lookup-line-off { opacity: 0.55; }
 .lookup-history { margin: 4px 0 0; word-break: normal; }
 
+.empty-folders { border: 1px solid var(--border); padding: 8px 12px; margin: 8px 0; }
+.empty-folders-head, .empty-folders-foot { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--fg-dim); }
+.empty-folders-tools, .empty-folders-foot button { margin-left: auto; }
+.empty-folders-list { list-style: none; margin: 8px 0; max-height: 260px; overflow-y: auto; font-size: 12px; }
+.empty-folders-list label { display: flex; align-items: center; gap: 8px; padding: 1px 4px; cursor: pointer; }
+.empty-folders-list label:hover { background: var(--bg-surface); }
+.empty-folders-date { margin-left: auto; padding-left: 16px; color: var(--fg-dim); }
+
 .maintenance-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
 .stats-table th, .tagger-table th, .tagger-thresh-table th, .gallery-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: normal; color: var(--fg-dim); }
 .maintenance-table td, .stats-table td, .tagger-table td, .gallery-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
@@ -1842,6 +1881,8 @@ a.btn-sm:hover { text-decoration: none; }
   min-width: 7em;
   font-variant-numeric: tabular-nums;
 }
+/* The percentage gives this column the slack the other two leave. */
+.stats-table td.stats-path { width: 100%; overflow-wrap: anywhere; }
 .stats-table th.stats-d1 { padding-left: 24px; }
 .stats-table th.stats-d2 { padding-left: 44px; }
 .stats-table th.stats-d3 { padding-left: 64px; }
@@ -1852,7 +1893,6 @@ a.btn-sm:hover { text-decoration: none; }
 }
 
 
-/* The upgrade prompt puts its file comparison on its own lines. */
 #confirm-dialog-msg { white-space: pre-wrap; }
 .confirm-dialog-danger { color: var(--error); font-size: 12px; margin-top: 4px; }
 .confirm-dialog-danger:empty { display: none; }
@@ -1944,7 +1984,7 @@ section#tagger .tagger-table .tagger-row-desc { display: block; margin-top: 2px;
 .tagger-gal-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 16px; align-items: start; }
 .tagger-gal-allrow { margin-bottom: 8px; }
 .tagger-gal-actions { display: flex; gap: 8px; margin-bottom: 8px; }
-.tagger-gal-list { list-style: none; padding: 0; margin: 0 0 12px 0; }
+.tagger-gal-list, .gallery-switch-list { list-style: none; padding: 0; margin: 0 0 12px 0; }
 .tagger-gal-list li { padding: 2px 0; }
 
 .gallery-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
@@ -1956,12 +1996,11 @@ section#tagger .tagger-table .tagger-row-desc { display: block; margin-top: 2px;
 .gallery-table td:nth-child(n+5) { width: 1%; white-space: nowrap; text-align: right; }
 .gallery-table th:nth-child(n+5) { padding-right: 17px; }
 .gallery-table td:nth-child(n+5) > .status-dim { display: block; text-align: center; }
-.gallery-switch-list { list-style: none; padding: 0; margin: 0 0 12px 0; }
 .gallery-switch-list li { padding: 4px 0; }
 .gallery-switch-current { color: var(--fg-dim); }
 
 .status-ok { color: var(--success); }
-.status-dim { color: var(--fg-dim); opacity: 0.6; }
+.status-dim, .status-badge.status-faint { color: var(--fg-dim); opacity: 0.6; }
 .status-badge {
   display: inline-block;
   margin-left: 8px;
@@ -1974,7 +2013,6 @@ section#tagger .tagger-table .tagger-row-desc { display: block; margin-top: 2px;
 .status-badge.status-off { color: var(--fg-dim); }
 .status-badge.status-enabled { color: var(--success); border-color: var(--success); }
 .status-badge.status-warn { color: var(--warning); border-color: var(--warning); }
-.status-badge.status-faint { color: var(--fg-dim); opacity: 0.6; }
 
 dialog .field input[type="text"].upload-wide-input { width: 100%; min-width: 420px; max-width: none; }
 .upload-drop-zone {
@@ -2108,29 +2146,24 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 .relations-card-chain { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-top: 8px; }
 .relations-chain-arrow { color: var(--fg-dim); font-size: 20px; line-height: 1; align-self: center; }
 .relations-chain-cell { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-.relations-card-tree { display: flex; flex-direction: column; margin-top: 8px; }
-.relations-tree-row { display: flex; align-items: stretch; min-height: 180px; }
+.deriv-graph { margin: 8px auto 0; max-width: calc(var(--deriv-cols, 1) * 320px); }
+.deriv-row { display: flex; justify-content: center; align-items: flex-start; }
+.deriv-cell {
+  flex: 0 0 calc(100% / var(--deriv-cols, 1));
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 0 8px;
+  text-align: center;
+}
+.deriv-cell .relations-card-thumb,
+#relations-image-page .deriv-cell .relations-page-thumb-cell { width: 100%; max-width: 180px; margin: 0 auto; }
+.deriv-band, .deriv-band svg { height: 44px; }
+.deriv-band svg { display: block; width: 100%; }
+.deriv-band line { stroke: var(--fg-dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.deriv-band line.deriv-edge-lit { stroke: var(--accent); stroke-width: 2; }
+.deriv-cell [data-edge].deriv-edge-lit .btn-link-accent { color: var(--accent); text-decoration: underline; }
 .relations-inline-label { font-size: 12px; color: var(--fg-dim); padding: 0 8px; align-self: center; }
 .relations-inline-action { padding: 0 8px; display: inline-flex; align-self: center; }
-.relations-tree-prefix { display: flex; align-items: stretch; flex-shrink: 0; }
-.relations-tree-trunk { width: 32px; align-self: stretch; position: relative; }
-.relations-tree-trunk[data-style="line"]::before,
-.relations-tree-trunk[data-style="tee"]::before {
-  content: ""; position: absolute;
-  left: 50%; top: 0; bottom: 0;
-  border-left: 1px solid var(--fg-dim);
-}
-.relations-tree-trunk[data-style="elbow"]::before {
-  content: ""; position: absolute;
-  left: 50%; top: 0; height: 50%;
-  border-left: 1px solid var(--fg-dim);
-}
-.relations-tree-trunk[data-style="tee"]::after,
-.relations-tree-trunk[data-style="elbow"]::after {
-  content: ""; position: absolute;
-  left: 50%; top: 50%;
-  width: 16px; border-top: 1px solid var(--fg-dim);
-}
 .relations-tree-current { border-color: var(--accent); outline: 3px solid var(--accent); outline-offset: -3px; }
 .relations-card-thumb:hover { border-color: var(--accent); }
 .relations-card-id { position: absolute; bottom: 2px; right: 2px; font-size: 10px; background: color-mix(in srgb, var(--scrim) 70%, transparent); color: var(--fg); padding: 0 3px; }
@@ -2155,7 +2188,7 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 .collection-order-fname:hover { text-decoration: underline; }
 .collection-order-fname input { width: 100%; font-size: 11px; padding: 0; border: none; background: transparent; color: var(--fg); }
 .collection-order-tile .relations-card-id { top: 2px; right: 2px; bottom: auto; }
-.collection-preview { display: flex; flex-wrap: wrap; gap: 8px; height: 100px; overflow: hidden; } /* wrap + one-row height clip the strip to a single line, no scroll */
+.collection-preview { display: flex; flex-wrap: wrap; gap: 8px; height: 100px; overflow: hidden; }
 .collection-preview .relations-card-thumb { width: 100px; flex: 0 0 auto; }
 .relations-card-original { margin-right: 16px; border-color: var(--accent); }
 .relations-cell-original .manga-page-link { border-color: var(--accent); }
@@ -2175,11 +2208,11 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 .relations-session { padding: 16px; }
 .session-order-form { display: inline-flex; gap: 12px; align-items: center; margin-left: 16px; }
 #relations-session-page .detail-topbar { flex-wrap: wrap; row-gap: 8px; }
-#relations-session-page .detail-nav-group { flex: 1 0 auto; }
+#relations-session-page .detail-nav-group { flex: 1 1 auto; flex-wrap: wrap; }
 .session-order-form > .field-hint,
 .session-order-form > label { display: inline-flex; align-items: center; gap: 4px; line-height: 1; }
 .session-order-form label { font-size: 13px; color: var(--fg-dim); }
-.session-order-form .field-hint { font-size: 13px; margin: 0; }
+.session-order-form .field-hint,
 .detail-nav-group > .field-hint { font-size: 13px; margin: 0; }
 .session-role { margin: 0 0 4px; font-size: 13px; text-align: center; color: var(--fg-dim); align-self: stretch; }
 .session-pair { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
@@ -2202,7 +2235,7 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 .session-cell-img {
   display: block;
   width: 100%;
-  height: 55vh;
+  height: max(30vh, calc(100vh - 460px));
   object-fit: contain;
   background: var(--media-bg);
   border: 1px solid var(--border);
@@ -2479,7 +2512,6 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 @media (min-width: 769px) {
   #main-layout.sidebar-collapsed #sidebar { display: none; }
   #sidebar-toggle { display: none; }
-  /* The rail sits on the column's edge and carries the rule for it. */
   #sidebar { border-right: 0; }
 }
 @media (max-width: 839px) {
@@ -2529,8 +2561,6 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 
 .cat-color-pair { display: inline-flex; gap: 6px; align-items: center; }
 .cat-swatch { padding: 0; width: 30px; height: 22px; }
-/* Reads as the plain hex it replaced until it is hovered or focused. */
-/* Wide enough for the seven characters plus the datalist indicator. */
 .cat-hex { width: 13ch; padding: 1px 4px; background: transparent; border-color: transparent; }
 .cat-hex:hover { border-color: var(--border); }
 .cat-hex:focus { background: var(--bg-input); }
@@ -2565,7 +2595,6 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 .batch-lookup-summary { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 12px; }
 
 /* Save search area */
-#gallery-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 #save-search-area { margin-left: auto; }
 .save-search-terms { color: var(--link); font-style: italic; }
 
@@ -2876,8 +2905,7 @@ body.reader-body #gallery-status { display: none; }
 .ptr-contrib-same { color: var(--fg-dim); font-weight: bold; }
 .ptr-count { cursor: help; text-decoration: underline dotted; }
 .ptr-contrib-title { color: var(--monloader); font-weight: bold; }
-.ptr-contrib-failed { margin: 4px 0; color: var(--warning); }
-.ptr-contrib-unknown { margin: 4px 0; color: var(--warning); }
+.ptr-contrib-failed, .ptr-contrib-unknown { margin: 4px 0; color: var(--warning); }
 .ptr-known-as { color: var(--fg); }
 .ptr-contrib-actions { display: flex; gap: 8px; flex-shrink: 0; margin-left: auto; }
 .btn-ptr-contribute, .btn-ptr-pull { color: var(--monloader); border-color: var(--monloader); }
@@ -2889,8 +2917,6 @@ body.reader-body #gallery-status { display: none; }
 .ptr-lookup-head { display: flex; flex-wrap: wrap; gap: 4px 14px; justify-content: space-between; align-items: baseline; }
 .ptr-lookup-anywhere { display: flex; align-items: center; gap: 6px; }
 .ptr-lookup-note { margin: 10px 0 6px; }
-/* The dropdown is an overlay with no ground of its own, so a note there has
-   to carry the list's surface or it prints over the body under the field. */
 #ptr-lookup-suggest .ptr-lookup-note {
   margin: 0;
   padding: 3px 8px;
@@ -2900,6 +2926,7 @@ body.reader-body #gallery-status { display: none; }
 .ptr-lookup-back { margin-bottom: 2px; }
 #ptr-lookup-result > .suggest-list { position: static; max-height: 320px; }
 .ptr-contrib-dialog { max-width: 640px; width: min(640px, 92vw); max-height: 85vh; overflow-y: auto; }
+.ptr-contrib-loading p { margin: 0; }
 .ptr-contrib-dialog .dialog-actions { flex-wrap: wrap; }
 .ptr-contrib-summary { margin: 10px 0 0; color: var(--fg-dim); }
 .ptr-hunk-wrap { margin: 10px 0; }
@@ -2970,11 +2997,9 @@ label.ptr-row:hover { background: var(--bg-input); }
 .dir-picker-entry:focus-visible { outline: 1px solid var(--accent); }
 .desktop-folders { display: flex; gap: 6px; flex-wrap: wrap; }
 .desktop-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
-.desktop-power { display: flex; align-items: center; gap: 8px; }
-.desktop-quit { display: flex; align-items: center; gap: 8px; }
+.desktop-power, .desktop-quit { display: flex; align-items: center; gap: 8px; }
 
-/* First-run setup, a standalone page: the layout's pollers would all bounce
-   off the setup gate. */
+/* First-run setup */
 #setup-page { max-width: 620px; margin: 40px auto; padding: 0 16px; }
 #setup-page h1 { margin: 0; }
 #setup-page h2 { margin: 18px 0 10px; }

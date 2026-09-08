@@ -8,12 +8,6 @@
   <link rel="prefetch" href="/images/{{.Image.ID}}/page/{{.NextPage}}">
   {{end}}
 </head>
-{{/* When the reader was reached from /images/{id}/pages, anchor the
-     back link, the dialog form, and the page-nav extras at the pages
-     grid so the user lands where they came from. The from=pages flag
-     persists across page-flip clicks via the per-link query tail.
-     The #page-N fragment carries the current page so the pages grid
-     can focus + scroll to that cell on load. */}}
 {{$detailHref := printf "/images/%d%s" .Image.ID .BackQS}}{{if .BackToPages}}{{$detailHref = printf "/images/%d/pages%s#page-%d" .Image.ID .BackQS .Page}}{{end}}
 {{$pagesHref := printf "/images/%d/pages%s#page-%d" .Image.ID .BackQS .Page}}
 <body class="reader-body">
@@ -68,10 +62,7 @@
       <div class="field">
         <input type="number" name="page" id="reader-jump-input" min="1" max="{{.PageCount}}" value="{{.Page}}" autocomplete="off">
       </div>
-      <div class="dialog-actions">
-        <button type="submit">Go</button>
-        <button type="button" onclick="document.getElementById('reader-jump-dialog').close()">Cancel</button>
-      </div>
+      {{template "dialog_actions" dict "ID" "reader-jump-dialog" "Submit" "Go"}}
     </form>
   </dialog>
 </body>

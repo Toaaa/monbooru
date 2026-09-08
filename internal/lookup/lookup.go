@@ -70,6 +70,4 @@ func NextDue(now time.Time, backend string, attempts int) (time.Time, bool) {
 
 // stamp formats a time the way every other timestamp column in the schema is
 // stored, so string comparison in SQL orders correctly.
-func stamp(t time.Time) string {
-	return t.UTC().Format("2006-01-02T15:04:05Z")
-}
+func stamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05Z") }

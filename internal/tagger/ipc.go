@@ -161,9 +161,7 @@ type ipcBackend struct {
 // newIPCBackend constructs the parent-side IPC backend. The child is
 // spawned lazily on the first Run; constructor errors are limited to
 // process-environment problems (cannot determine own path).
-func newIPCBackend() (*ipcBackend, error) {
-	return &ipcBackend{}, nil
-}
+func newIPCBackend() (*ipcBackend, error) { return &ipcBackend{}, nil }
 
 // ensureRunning starts the child if it isn't alive yet. Caller must
 // hold b.mu.

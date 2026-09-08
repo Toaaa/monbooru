@@ -133,9 +133,7 @@ func statMissing(path string) bool {
 // know which gallery a tag job is about to run on (e.g. the Settings
 // page itself); per-gallery callers should use EnabledTaggersForGallery
 // instead.
-func EnabledTaggers(cfg *config.Config) []TaggerStatus {
-	return enabledTaggers(cfg, nil)
-}
+func EnabledTaggers(cfg *config.Config) []TaggerStatus { return enabledTaggers(cfg, nil) }
 
 // EnabledTaggersForGallery filters EnabledTaggers down to the rows whose
 // per-tagger Galleries list either is empty (applies to every gallery,
@@ -242,9 +240,7 @@ func resolveTaggerFiles(dir, explicitModel, explicitTags string) (string, string
 // isTaggerSidecar reports whether name is an operator sidecar rather
 // than a label file: excluding them by name keeps the lone-label
 // auto-pick and the empty-directory skip honest.
-func isTaggerSidecar(name string) bool {
-	return name == "tagger.json" || name == "dispatch.json"
-}
+func isTaggerSidecar(name string) bool { return name == "tagger.json" || name == "dispatch.json" }
 
 // hasTaggerFiles reports whether dir contains at least one file with a
 // tagger-related extension, used to skip empty subdirectories during

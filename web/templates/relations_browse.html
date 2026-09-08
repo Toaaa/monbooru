@@ -1,11 +1,8 @@
-{{/* relation_remove_form is one /relations/remove POST: confirm text, ok
-     label, button label, the type-specific hidden fields (dict), and an
-     optional reload-on-success for the destructive variants. */}}
 {{define "relation_remove_form"}}
         <form hx-post="/relations/remove" hx-target="#flash-relations" hx-swap="innerHTML"
               hx-confirm="{{.Confirm}}"
               data-confirm-ok="{{.OK}}"
-              {{if .Reload}}hx-on::after-request="if(event.detail.successful){setTimeout(function(){window.location.reload()},1500)}" {{end}}{{with .ExtraClass}}class="{{.}}" {{end}}style="display:inline">
+              {{if .Reload}}hx-on::after-request="if(event.detail.successful){setTimeout(function(){window.location.reload()},1500)}" {{end}}{{with .ExtraClass}}class="{{.}}" {{end}}{{with .Edge}}data-edge="{{.}}" {{end}}style="display:inline">
           <input type="hidden" name="_csrf" value="{{.CSRF}}">
           {{range $k, $v := .Fields}}<input type="hidden" name="{{$k}}" value="{{$v}}">
           {{end}}<button type="submit" class="btn-link-accent">[{{.Label}}]</button>
@@ -108,7 +105,7 @@
           <input type="checkbox" value="{{index .Members 0}}" class="merge-checkbox">
         </label>
         <strong>Derivative tree</strong>
-        ({{len .Members}} image(s), source #{{index .Members 0}})
+        ({{len .Members}} image(s), source{{if gt (len .Roots) 1}}s{{end}}{{range .Roots}} #{{.}}{{end}})
         {{template "relation_remove_form" dict "CSRF" $.CSRFToken "Confirm" (printf "Dissolve this derivative tree? Every edge between the %d images is dropped." (len .Members)) "OK" "Dissolve" "Label" "dissolve" "Reload" true "Fields" (dict "type" "dissolve-derivative" "root_id" (index .Members 0))}}
         {{if eq (len .Members) 2}}
         {{template "relation_remove_form" dict "CSRF" $.CSRFToken "Confirm" "Unlink this derivative edge and queue the pair for the session?" "OK" "Review again" "Label" "review again" "Fields" (dict "type" "review-again" "kind" "derivative" "a" (index .Members 0) "b" (index .Members 1))}}
@@ -154,23 +151,31 @@
           {{template "partials/relations_card_thumb.html" (dict "ID" $source "ActiveGallery" $.ActiveGallery "ExtraClass" "relations-card-summary-thumb" "Title" (printf "Image %d - added %s" $source (index $card.MemberIngestedAt $source)))}}
           <span class="relations-card-summary-meta">tree, {{len .Members}} images</span>
         </summary>
-        <div class="relations-card-tree">
-          {{$deep := gt (len .Members) 2}}
-          {{range .TreeRows}}
-          {{$row := .}}
-          <div class="relations-tree-row" data-depth="{{.Depth}}">
-            {{if .Trunks}}
-            <div class="relations-tree-prefix" aria-hidden="true">
-              {{range $row.Trunks}}<span class="relations-tree-trunk" data-style="{{.}}"></span>{{end}}
+        {{with .Graph}}
+        {{$g := .}}
+        <div class="deriv-graph" style="--deriv-cols:{{$g.Cols}}">
+          {{range $r, $cells := $g.Rows}}
+          <div class="deriv-row">
+            {{range $cells}}
+            {{$node := .}}
+            <div class="deriv-cell">
+              {{template "partials/relations_card_thumb.html" (dict "ID" .ID "ActiveGallery" $.ActiveGallery "Title" (printf "Image %d - added %s" .ID (index $card.MemberIngestedAt .ID)) "Date" (index $card.MemberIngestedAt .ID))}}
+              {{range $node.Sources}}
+              {{template "relation_remove_form" dict "CSRF" $.CSRFToken "Confirm" "Unlink this derivative edge and queue the pair for the session?" "OK" "Review again" "Label" (printf "review again #%d" .) "ExtraClass" "relations-inline-action" "Edge" (printf "%d-%d" . $node.ID) "Fields" (dict "type" "review-again" "kind" "derivative" "a" . "b" $node.ID)}}
+              {{end}}
             </div>
             {{end}}
-            {{template "partials/relations_card_thumb.html" (dict "ID" .ID "ActiveGallery" $.ActiveGallery "Title" (printf "Image %d - added %s" .ID (index $card.MemberIngestedAt .ID)) "Date" (index $card.MemberIngestedAt .ID))}}
-            {{if and $deep .Source}}
-            {{template "relation_remove_form" dict "CSRF" $.CSRFToken "Confirm" "Unlink this derivative edge and queue the pair for the session?" "OK" "Review again" "Label" "review again" "ExtraClass" "relations-inline-action" "Fields" (dict "type" "review-again" "kind" "derivative" "a" $row.Source "b" $row.ID)}}
-            {{end}}
+          </div>
+          {{if lt $r (len $g.Bands)}}
+          <div class="deriv-band">
+            <svg viewBox="0 0 {{$g.Width}} {{$g.BandH}}" preserveAspectRatio="none" aria-hidden="true">
+              {{range index $g.Bands $r}}<line data-edge="{{.From}}-{{.To}}" x1="{{.X1}}" y1="0" x2="{{.X2}}" y2="{{$g.BandH}}"/>{{end}}
+            </svg>
           </div>
           {{end}}
+          {{end}}
         </div>
+        {{end}}
       </details>
       {{else}}
       <div class="relations-card-thumbs{{if eq .Kind "not_related"}} relations-card-thumbs-pair{{end}}">
@@ -208,10 +213,7 @@
     <h4>Merge same-image groups</h4>
     <p class="field-hint">Which group's original wins on the merged row?</p>
     <ul id="merge-dup-choices" class="merge-dup-choices"></ul>
-    <div class="dialog-actions">
-      <button type="submit" class="btn-success">Merge</button>
-      <button type="button" onclick="document.getElementById('merge-dup-dialog').close()">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "merge-dup-dialog" "Submit" "Merge" "Class" "btn-success"}}
   </form>
 </dialog>
 

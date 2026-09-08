@@ -50,6 +50,7 @@ var Keywords = []string{
 	"relation",
 	"similar",
 	"id",
+	"batch",
 	"lookup",
 	"upgrade",
 }
@@ -90,7 +91,7 @@ var Expansions = map[string][]string{
 	"height":     {">=", "<=", ">", "<", "=", ".."},
 	"date":       {">", "<", ">=", "<=", "=", ".."},
 	"missing":    {"true", "false"},
-	"tagged":     {"true", "false"},
+	"tagged":     {"true", "false", "user"},
 	"autotagged": {"true", "false"},
 	"stale":      {"any", "none"},
 	"rating":     {"general", "sensitive", "questionable", "explicit"},
@@ -111,11 +112,13 @@ var Expansions = map[string][]string{
 // rows are hints (comparison operators for the numeric filters, the any/none
 // shortcuts for stale and source) rather than the full set of accepted
 // values. stale: also takes an open tag name, source: and upgrade: an open
-// site label, so their values are never flagged as unrecognised.
+// site label, tagged: and autotagged: an open source label, so their values
+// are never flagged as unrecognised.
 var rangeKeys = map[string]bool{
 	"width": true, "height": true, "date": true, "size": true,
 	"ratio": true, "tagcount": true, "duration": true, "pages": true,
 	"stale": true, "source": true, "upgrade": true,
+	"tagged": true, "autotagged": true,
 }
 
 // closedVocab is the membership-test view of Expansions for the keys
@@ -172,8 +175,8 @@ var Descriptions = map[string]string{
 	"height":     "image height",
 	"date":       "ingestion date",
 	"missing":    "files gone from disk",
-	"tagged":     "has any tag",
-	"autotagged": "has auto-tag",
+	"tagged":     "has any tag, or by source",
+	"autotagged": "has auto-tag, or by tagger",
 	"stale":      "tags a source dropped",
 	"folder":     "folder (recursive)",
 	"folderonly": "folder (exact)",
@@ -199,6 +202,7 @@ var Descriptions = map[string]string{
 	"relation":   "declared relation",
 	"similar":    "tag similarity to image id (~score 0..1 for a threshold)",
 	"id":         "image id",
+	"batch":      "upload batch id",
 	"lookup":     "scheduled lookup state",
 	"upgrade":    "source serves a different file",
 }
@@ -277,6 +281,9 @@ var ExpansionDescriptions = map[string]map[string]string{
 	"source": {
 		"none": "no source at all",
 		"any":  "any source",
+	},
+	"tagged": {
+		"user": "added by hand",
 	},
 	"lookup": {
 		"never":     "not tried yet",

@@ -1,7 +1,4 @@
 {{define "partials/tag_list.html"}}
-{{/* The image's tags are listed in the sidebar; what stays under the image is
-     the editor's own feedback: the add/remove flashes and the session's own
-     adds, mirrored from the sidebar by separateNewTags. */}}
 <div id="image-tags" data-image-id="{{.ImageID}}">
   {{if .ErrMsg}}<div class="flash flash-err" style="margin-bottom:4px">{{.ErrMsg}}</div>{{end}}
   {{if .WarnMsg}}<div class="flash flash-warn" style="margin-bottom:4px">{{.WarnMsg}}</div>{{end}}

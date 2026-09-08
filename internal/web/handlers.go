@@ -115,6 +115,13 @@ func (s *Server) notFoundHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, p, http.StatusMovedPermanently)
 		return
 	}
+	s.renderNotFound(w, r)
+}
+
+// renderNotFound is notFoundHandler without the slash retry, for a route
+// registered as a subtree: the mux already redirects its slash-less form
+// onto the trailing slash, so retrying it there is a redirect loop.
+func (s *Server) renderNotFound(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
 	s.renderTemplate(w, "notfound.html", s.base(r, "", "Not found - "+s.booruName()))
 }
@@ -184,6 +191,12 @@ func userAndStaleTags(imageTags []models.ImageTag) (hasUser, hasStale bool) {
 	return hasUser, hasStale
 }
 
+// extraImagePaths counts the copies a delete takes alongside the canonical
+// one. A read that came back empty is not a negative count.
+func extraImagePaths(paths []models.ImagePath) int {
+	return max(len(paths)-1, 0)
+}
+
 func loadImagePaths(ctx context.Context, database *db.DB, id int64) []models.ImagePath {
 	rows, err := database.Read.QueryContext(ctx,
 		`SELECT id, image_id, path, is_canonical FROM image_paths WHERE image_id = ? ORDER BY is_canonical DESC, id`,
@@ -223,11 +236,8 @@ const defaultThemeColor = "#0e0e0e"
 
 // manifestHandler serves the web app manifest behind the layout's
 // <link rel="manifest">, so a browser can install the gallery as a
-// home-screen app. The icon follows server.logo the same way
-// booruFaviconURL does - an override replaces the bundled icon rather
-// than sitting beside it, and an active theme's logo.png does not reach
-// it - and carries no sizes hint, since the operator's file has
-// whatever dimensions it has.
+// home-screen app. No theme file reaches the icon: the installed-app icon
+// is drawn at 192px, which is neither the topbar logo nor the tab icon.
 func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	icon := map[string]any{
 		"src":     "/static/icon-192.png",
@@ -235,14 +245,11 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		"type":    "image/png",
 		"purpose": "any maskable",
 	}
-	if logo := s.customLogoURL(); logo != "" {
-		icon = map[string]any{"src": logo}
-	}
 	name := s.booruName()
 	color := cmp.Or(s.themeColor(), defaultThemeColor)
 	w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
 	// Built from live config, so a heuristic cache would keep serving the
-	// old name after a rename; /custom.css and /custom.logo revalidate for
+	// old name after a rename; an installed theme's files revalidate for
 	// the same reason.
 	w.Header().Set("Cache-Control", "no-cache")
 	_ = json.NewEncoder(w).Encode(map[string]any{

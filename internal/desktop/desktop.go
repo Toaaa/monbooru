@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/monbooru/monbooru/internal/fsx"
 )
 
 // Layout is where one app keeps its files under the desktop profile.
@@ -46,7 +44,7 @@ func Resolve(app, explicitConfig string) (Layout, error) {
 		// read-only location does not try to seed one there. Skipped in a
 		// sandbox, whose directories are already private to the install.
 		if !Sandboxed() {
-			if dir := fsx.ExeDir(); dir != "" {
+			if dir := InstallDir(); dir != "" {
 				if p := filepath.Join(dir, app+".toml"); isFile(p) {
 					l.ConfigPath, l.Portable = p, true
 					l.DataDir = filepath.Join(dir, "data")
@@ -89,6 +87,34 @@ func dataHome(app string) (string, error) {
 		return "", fmt.Errorf("locating the data directory: %w", err)
 	}
 	return filepath.Join(dir, app, "data"), nil
+}
+
+// Program is the path that starts this install again. Inside an AppImage
+// the executable lives in a mount that is gone once the process exits, so
+// the file the user actually has is the AppImage itself.
+func Program() string {
+	if p := os.Getenv("APPIMAGE"); p != "" {
+		return p
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return exe
+}
+
+// InstallDir is the folder portable mode reads its config from: the one
+// holding the AppImage, or the executable's own. Bundled tools stay behind
+// fsx.ExeDir, which has to keep pointing inside the mount.
+func InstallDir() string {
+	p := Program()
+	if p == "" {
+		return ""
+	}
+	return filepath.Dir(p)
 }
 
 // Sandboxed reports whether the process runs inside a Flatpak sandbox,

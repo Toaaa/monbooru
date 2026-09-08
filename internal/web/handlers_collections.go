@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
+	"github.com/monbooru/monbooru/internal/jobs"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
 )
@@ -45,7 +45,7 @@ func (s *Server) collectionsHandler(w http.ResponseWriter, r *http.Request) {
 	if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
 		page = p
 	}
-	excludeIDs := resolveCeiling(r, s.Active()).ExcludedTagIDs()
+	excludeIDs := resolveCeiling(r, s.active()).ExcludedTagIDs()
 
 	total, err := gallery.CountCollections(s.db(), prefix, excludeIDs)
 	if err != nil {
@@ -118,9 +118,8 @@ func (s *Server) collectionFindRelationsPost(w http.ResponseWriter, r *http.Requ
 	if !parseFormOK(w, r) {
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("collection"))
-	if name == "" {
-		flashStatus(w, http.StatusBadRequest, "Collection label required.")
+	name, ok := requiredFormFlash(w, r, "collection", "Collection label required.")
+	if !ok {
 		return
 	}
 	enabled := r.FormValue("enabled") == "1"
@@ -162,7 +161,7 @@ func (s *Server) collectionOrderDialog(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
 		limit = n
 	}
-	excludeIDs := resolveCeiling(r, s.Active()).ExcludedTagIDs()
+	excludeIDs := resolveCeiling(r, s.active()).ExcludedTagIDs()
 	members, err := gallery.CollectionMembers(s.db(), name, excludeIDs, limit+1, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -189,9 +188,8 @@ func (s *Server) reorderCollectionPost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("collection"))
-	if name == "" {
-		flashStatus(w, http.StatusBadRequest, "Collection label required.")
+	name, ok := requiredFormFlash(w, r, "collection", "Collection label required.")
+	if !ok {
 		return
 	}
 	// Filename mode ignores the clicked ids and orders the whole collection by
@@ -201,13 +199,12 @@ func (s *Server) reorderCollectionPost(w http.ResponseWriter, r *http.Request) {
 			flashStatus(w, http.StatusInternalServerError, "Could not reorder the collection.")
 			return
 		}
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 		writeInlineFlash(w, "ok", "Ordered by filename.")
 		return
 	}
-	raw := strings.TrimSpace(r.FormValue("ids"))
-	if raw == "" {
-		flashStatus(w, http.StatusBadRequest, "Click at least one image first.")
+	raw, ok := requiredFormFlash(w, r, "ids", "Click at least one image first.")
+	if !ok {
 		return
 	}
 	var ids []int64
@@ -219,12 +216,22 @@ func (s *Server) reorderCollectionPost(w http.ResponseWriter, r *http.Request) {
 		}
 		ids = append(ids, id)
 	}
+	clicked := len(ids)
+	// The dialog only offers the members the ceiling lets through, so the
+	// hidden ones ride behind the arranged block instead of being cleared
+	// with everything the operator did not click.
+	hidden, err := gallery.CollectionHiddenOrderedIDs(s.db(), name, resolveCeiling(r, s.active()).ExcludedTagIDs())
+	if err != nil {
+		flashStatus(w, http.StatusInternalServerError, "Could not reorder the collection.")
+		return
+	}
+	ids = append(ids, hidden...)
 	if err := gallery.ReorderCollection(s.db(), name, ids); err != nil {
 		flashStatus(w, http.StatusInternalServerError, "Could not reorder the collection.")
 		return
 	}
-	s.Active().InvalidateCaches()
-	writeInlineFlash(w, "ok", fmt.Sprintf("Ordered %d image(s).", len(ids)))
+	s.active().InvalidateCaches()
+	writeInlineFlash(w, "ok", fmt.Sprintf("Ordered %d image(s).", clicked))
 }
 
 // startCollectionJob materialises the collection's membership and spawns run
@@ -254,9 +261,8 @@ func (s *Server) dissolveCollectionPost(w http.ResponseWriter, r *http.Request) 
 	if !parseFormOK(w, r) {
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("collection"))
-	if name == "" {
-		flashStatus(w, http.StatusBadRequest, "Collection label required.")
+	name, ok := requiredFormFlash(w, r, "collection", "Collection label required.")
+	if !ok {
 		return
 	}
 	s.startCollectionJob(w, name, func(ids []int64) {
@@ -296,47 +302,8 @@ func (s *Server) runRenameCollection(ids []int64, oldName, newName string) {
 		}
 	}
 
-	processed, cancelled, err := chunkedJob(ctx, s.jobs, ids, chunkSize, "renaming collection", func(chunk []int64) error {
-		placeholders, chunkArgs := db.InPlaceholders(chunk)
-		tx, err := s.db().Write.Begin()
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if merging {
-			if _, err := tx.Exec(
-				`DELETE FROM image_collections
-				 WHERE name = ? AND image_id IN (`+placeholders+`)
-				   AND image_id IN (SELECT image_id FROM image_collections WHERE name = ?)`,
-				append(append([]any{oldName}, chunkArgs...), newName)...,
-			); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.Exec(
-			`UPDATE image_collections SET name = ?, position = position + ?
-			 WHERE name = ? AND image_id IN (`+placeholders+`)`,
-			append([]any{newName, posOffset, oldName}, chunkArgs...)...,
-		); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(
-			`UPDATE images SET series = ? WHERE series = ? COLLATE NOCASE AND id IN (`+placeholders+`)`,
-			append([]any{newName, oldName}, chunkArgs...)...,
-		); err != nil {
-			return err
-		}
-		// Sync the home position to whichever membership survived (the
-		// pre-existing target's position wins on a merge).
-		if _, err := tx.Exec(
-			`UPDATE images SET series_order =
-			   (SELECT position FROM image_collections WHERE image_id = images.id AND name = ?)
-			 WHERE series = ? COLLATE NOCASE AND id IN (`+placeholders+`)`,
-			append([]any{newName, newName}, chunkArgs...)...,
-		); err != nil {
-			return err
-		}
-		return tx.Commit()
+	processed, cancelled, err := jobs.Chunked(ctx, s.jobs, ids, chunkSize, "renaming collection", func(chunk []int64) error {
+		return gallery.RenameCollectionForImages(s.db(), chunk, oldName, newName, posOffset, merging)
 	})
 	if err == nil {
 		// Carry the find-relations opt-in to the new label; on a merge the
@@ -351,7 +318,7 @@ func (s *Server) runRenameCollection(ids []int64, oldName, newName string) {
 				logx.Debugf("rename collection find-relations flag: %v", e)
 			}
 		}
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 	}
 	s.finishJob(err, cancelled, fmt.Sprintf("rename cancelled (%d/%d processed)", processed, total), fmt.Sprintf("Renamed collection across %d image(s).", processed))
 }

@@ -11,17 +11,27 @@ import (
 	"github.com/monbooru/monbooru/internal/gallery"
 )
 
-// namePreviewRows caps what the preview shows: enough to see a sequence
-// advance, few enough that typing stays cheap on a large scope.
-const namePreviewRows = 3
+// namePreviewRows caps what a keystroke renders: enough to see a sequence
+// advance, few enough that typing stays cheap on a large scope. The
+// operator can ask for namePreviewRowsMax on a click, which is bounded
+// too - a {md5} template hashes files that carry no digest yet, and one
+// click must not turn into an unbounded read.
+const (
+	namePreviewRows    = 5
+	namePreviewRowsMax = 25
+	// namePreviewFrom is how much of the old path a row shows before the
+	// middle is elided, the way elideHash treats a digest. It is what fits
+	// the narrower of the two columns at the dialog's declared width, so
+	// the CSS ellipsis behind it never has to add a second one.
+	namePreviewFrom = 36
+)
 
-// namePreviewScopes maps the surface a field belongs to onto the parse
-// scope, so the preview refuses exactly what the submit would.
-var namePreviewScopes = map[string]gallery.Scope{
-	"rename":       gallery.ScopeRename,
-	"rename-batch": gallery.ScopeRenameBatch,
-	"move":         gallery.ScopeMove,
-	"move-batch":   gallery.ScopeMoveBatch,
+// namePreviewScopes maps the surface a dialog belongs to onto the parse
+// scopes its two fields use, so the preview refuses exactly what the submit
+// would.
+var namePreviewScopes = map[string]struct{ folder, name gallery.Scope }{
+	"place":       {gallery.ScopeMove, gallery.ScopeRename},
+	"place-batch": {gallery.ScopeMoveBatch, gallery.ScopeRenameBatch},
 }
 
 // namePreview answers what a template would name the given images, so the
@@ -40,25 +50,34 @@ func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 	if !known {
 		return
 	}
-	raw := strings.TrimSpace(q.Get("tmpl"))
-	var tmpl *gallery.NameTemplate
-	var err error
-	if scope == gallery.ScopeRenameBatch {
-		// The job's own entry point, so the preview shows the implicit {n}
-		// a plain base name gets instead of the whole scope on one name.
-		tmpl, err = gallery.ParseBatchRenameTemplate(raw)
-	} else {
-		tmpl, err = gallery.ParseNameTemplate(raw, scope)
-	}
+	rawFolder, wantFolder := strings.TrimSpace(q.Get("folder")), q.Has("folder")
+	rawName := strings.TrimSpace(q.Get("name"))
+	folderTmpl, err := gallery.ParseNameTemplate(rawFolder, scope.folder)
 	if err != nil {
-		s.renderNamePreviewError(w, "", err.Error())
+		s.renderNamePreviewError(w, "folder", err.Error())
 		return
 	}
-	if tmpl == nil {
+	var nameTmpl *gallery.NameTemplate
+	if scope.name == gallery.ScopeRenameBatch {
+		// The job's own entry point, so the preview shows the implicit {n}
+		// a plain base name gets instead of the whole scope on one name.
+		nameTmpl, err = gallery.ParseBatchRenameTemplate(rawName)
+	} else {
+		nameTmpl, err = gallery.ParseNameTemplate(rawName, scope.name)
+	}
+	if err != nil {
+		s.renderNamePreviewError(w, "name", err.Error())
+		return
+	}
+	if !wantFolder && nameTmpl == nil {
 		return
 	}
 
-	ids := s.namePreviewIDs(q["ids"])
+	want := namePreviewRows
+	if n, _ := strconv.Atoi(q.Get("rows")); n > want {
+		want = min(n, namePreviewRowsMax)
+	}
+	ids := s.namePreviewIDs(q["ids"], want)
 	if len(ids) == 0 {
 		return
 	}
@@ -67,52 +86,57 @@ func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 
 	rows := make([]namePreviewRow, 0, len(ids))
 	var rowErr error
+	var changed bool
 	md5Cap := s.previewMD5Cap()
+	// The rows arrive in scope order, so the run's own numbering can be
+	// replayed against them: a destination taken on disk or by an earlier row
+	// is numbered aside, and a preview the job then rewrites is the one thing
+	// the affordance must not do.
+	claimed := make(map[string]struct{}, len(ids))
 	for i, id := range ids {
-		facts, factErr := gallery.LoadNameFacts(r.Context(), s.db(), s.activeGallery(), id, md5Cap, tmpl)
+		facts, factErr := gallery.LoadNameFacts(r.Context(), s.db(), s.activeGallery(), id, md5Cap, folderTmpl, nameTmpl)
 		if factErr != nil {
 			rowErr = factErr
 			continue
 		}
 		facts.N, facts.NWidth = i+1, max(len(strconv.Itoa(total)), 2)
-		// What the submit will actually use: singleName and batchName both
-		// take the literal when the template carries no token of its own,
-		// and only a render passes through the path tidying.
-		to := raw
-		if tmpl.HasTokens() {
-			rendered, renderErr := tmpl.Render(facts)
+
+		var folder, name *string
+		if wantFolder {
+			rendered, renderErr := renderOrLiteral(folderTmpl, rawFolder, facts)
 			if renderErr != nil {
 				rowErr = renderErr
 				continue
 			}
-			to = rendered
-		}
-		from := facts.Base
-		if scope.Folder() {
 			// Containment is the move's other refusal, and the preview is
 			// where a destination gets checked: submitting an escaping one
 			// answers a status htmx discards, so the dialog would just sit
 			// there saying nothing.
-			abs, err := gallery.ResolveSubdir(s.galleryPath(), to)
-			if err != nil {
-				s.renderNamePreviewError(w, "", err.Error())
+			if _, resolveErr := gallery.ResolveSubdir(s.galleryPath(), rendered); resolveErr != nil {
+				s.renderNamePreviewError(w, "folder", resolveErr.Error())
 				return
 			}
-			// Show where the move lands, not what was typed: ResolveSubdir
-			// trims and cleans, so `a//b` files under `a/b` and `./x` under
-			// `x`. A preview the job then rewrites is the one thing the
-			// affordance must not do.
-			to = gallery.FolderPath(s.galleryPath(), filepath.Join(abs, facts.Base))
-			// A move keeps the name and changes the folder, so both sides
-			// carry the whole path; naming only the destination folder reads
-			// as renaming the file to a directory.
-			from, to = namePath(facts.Folder, facts.Base), namePath(to, facts.Base)
-		} else if onDisk := filepath.Ext(facts.Base); !strings.EqualFold(filepath.Ext(to), onDisk) {
-			// Mirror RenameImage: the extension already on disk is what gets
-			// appended, spelling included, when the render carries none.
-			to += onDisk
+			folder = &rendered
 		}
-		rows = append(rows, namePreviewRow{From: from, To: to})
+		if nameTmpl != nil {
+			rendered, renderErr := renderOrLiteral(nameTmpl, rawName, facts)
+			if renderErr != nil {
+				rowErr = renderErr
+				continue
+			}
+			name = &rendered
+		}
+		dest, _, destErr := gallery.PlannedPath(s.db(), s.galleryPath(), id, folder, name, claimed)
+		if destErr != nil {
+			rowErr = destErr
+			continue
+		}
+		claimed[dest] = struct{}{}
+		// Either half can change, so both sides carry the whole path.
+		from := namePath(facts.Folder, facts.Base)
+		to := namePath(gallery.FolderPath(s.galleryPath(), dest), filepath.Base(dest))
+		changed = changed || from != to
+		rows = append(rows, namePreviewRow{From: elideMiddle(from, namePreviewFrom), FromFull: from, To: to})
 	}
 	if len(rows) == 0 {
 		if rowErr != nil {
@@ -120,23 +144,59 @@ func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// A destination that renames and moves nothing is the state the dialog
+	// opens in; printing the scope back unchanged is noise.
+	if !changed {
+		return
+	}
 	caption := ""
 	if total > len(rows) {
 		caption = fmt.Sprintf("first %d of %d, in scope order", len(rows), total)
 	}
-	s.renderNamePreview(w, caption, rows)
+	// Offer more only when there are more to fetch: the caller sends the head
+	// of the scope, so a short id list is all there is to show.
+	more := len(rows) == want && total > len(rows) && want < namePreviewRowsMax
+	// Sample rows show where each one lands, never the shape of the whole
+	// run. A folder built on an identity token gives every image one of its
+	// own, which is the destination mistake worth naming before it is made.
+	note := ""
+	if total > 1 && wantFolder && folderTmpl.PerImage() {
+		note = fmt.Sprintf("a folder per image, up to %d new ones", total)
+	}
+	s.renderNamePreview(w, caption, note, rows, more)
 }
 
-type namePreviewRow struct{ From, To string }
+// elideMiddle keeps both ends of a path, which is what someone checking a
+// destination reads: the folder it starts in and the name it ends with.
+// The whole value stays one hover away in the row's title. Counted in
+// runes, since a filename is in whatever script named it.
+func elideMiddle(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	head := max / 3
+	return string(r[:head]) + "..." + string(r[len(r)-(max-head-3):])
+}
+
+// renderOrLiteral resolves a half the way the submit will: singleName and
+// batchName both take the literal when the template carries no token of its
+// own, and only a render passes through the path tidying.
+func renderOrLiteral(tmpl *gallery.NameTemplate, literal string, facts gallery.NameFacts) (string, error) {
+	if !tmpl.HasTokens() {
+		return literal, nil
+	}
+	return tmpl.Render(facts)
+}
+
+type namePreviewRow struct{ From, FromFull, To string }
 
 // previewMD5Cap bounds the lazy {md5} fill the preview endpoints can
 // trigger. They run off a keystroke on ids the caller names, so without
 // it typing {md5} into a dialog reads whole files inside the request.
 // Over the cap the token renders empty and the backfill job owns the
 // digest, matching the detail page's md5 cell.
-func (s *Server) previewMD5Cap() int64 {
-	return int64(s.maxFileSizeMB()) * 1024 * 1024
-}
+func (s *Server) previewMD5Cap() int64 { return int64(s.maxFileSizeMB()) * 1024 * 1024 }
 
 // namePath places base under dir. An empty dir is the gallery root, where
 // the path is the name on its own.
@@ -147,10 +207,13 @@ func namePath(dir, base string) string {
 	return dir + "/" + base
 }
 
-func (s *Server) renderNamePreview(w http.ResponseWriter, caption string, rows []namePreviewRow) {
+func (s *Server) renderNamePreview(w http.ResponseWriter, caption, note string, rows []namePreviewRow, more bool) {
 	s.renderTemplate(w, "partials/name_preview.html", map[string]any{
-		"Caption": caption,
-		"Rows":    rows,
+		"Caption":  caption,
+		"Note":     note,
+		"Rows":     rows,
+		"More":     more,
+		"NextRows": namePreviewRowsMax,
 	})
 }
 
@@ -177,7 +240,7 @@ func (s *Server) uploadDestPreview(ctx context.Context, w http.ResponseWriter, f
 		s.renderNamePreviewError(w, "name", err.Error())
 		return
 	}
-	ids := s.namePreviewIDs(nil)
+	ids := s.namePreviewIDs(nil, 1)
 	if (folderTmpl == nil && nameTmpl == nil) || len(ids) == 0 {
 		return
 	}
@@ -206,7 +269,7 @@ func (s *Server) uploadDestPreview(ctx context.Context, w http.ResponseWriter, f
 		}
 		to = namePath(dir, base)
 	}
-	s.renderNamePreview(w, "a file arriving now", []namePreviewRow{{From: facts.Base, To: to}})
+	s.renderNamePreview(w, "a file arriving now", "", []namePreviewRow{{From: facts.Base, FromFull: facts.Base, To: to}}, false)
 }
 
 // ingestNaming is where a file found on disk is filed, which is the
@@ -234,18 +297,18 @@ func (s *Server) receivedNaming(galleryName string) (writeDir string, n gallery.
 	return gallery.ReceivedNaming(galleryName, "", strings.TrimSpace(folder), "")
 }
 
-// namePreviewIDs takes the ids the caller named, or falls back to the
-// newest row so the settings fields have something real to render
-// against without the page knowing an id. htmx flattens an array value
-// into one comma-joined parameter, so both shapes are read.
-func (s *Server) namePreviewIDs(raw []string) []int64 {
+// namePreviewIDs takes the ids the caller named, capped at want, or falls
+// back to the newest row so the settings fields have something real to
+// render against without the page knowing an id. htmx flattens an array
+// value into one comma-joined parameter, so both shapes are read.
+func (s *Server) namePreviewIDs(raw []string, want int) []int64 {
 	flat := make([]string, 0, len(raw))
 	for _, v := range raw {
 		flat = append(flat, strings.Split(v, ",")...)
 	}
 	ids := parseIDList(flat)
-	if len(ids) > namePreviewRows {
-		ids = ids[:namePreviewRows]
+	if len(ids) > want {
+		ids = ids[:want]
 	}
 	if len(ids) > 0 {
 		return ids

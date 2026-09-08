@@ -92,17 +92,13 @@ func (n *bkNode) child(dist int) *bkNode {
 
 // NewBKTree returns an empty tree. Use BuildFromDB to populate from
 // SQLite, or call Insert directly when feeding individual rows.
-func NewBKTree() *BKTree {
-	return &BKTree{idIndex: make(map[int64]int64)}
-}
+func NewBKTree() *BKTree { return &BKTree{idIndex: make(map[int64]int64)} }
 
 // Built reports whether BuildFromDB has been called at least once on
 // this tree. Useful for "is this gallery ready for relations queries"
 // gating in handlers that want to avoid showing a partial result while
 // the lazy build is in flight.
-func (t *BKTree) Built() bool {
-	return t.built.Load()
-}
+func (t *BKTree) Built() bool { return t.built.Load() }
 
 // Reset clears every entry. Used after a full backfill so the next
 // query rebuilds against the new DB contents instead of paying the
@@ -259,9 +255,7 @@ func (t *BKTree) searchLocked(node *bkNode, query int64, d int, out *[]int64) {
 
 // hammingDistance returns the number of differing bits between the
 // unsigned interpretations of a and b.
-func hammingDistance(a, b int64) int {
-	return bits.OnesCount64(uint64(a) ^ uint64(b))
-}
+func hammingDistance(a, b int64) int { return bits.OnesCount64(uint64(a) ^ uint64(b)) }
 
 // Registry maps a SQLite handle to its in-memory BKTree. Per-gallery
 // galleryCtx registers its handle at startup and deregisters when the

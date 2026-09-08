@@ -821,13 +821,55 @@ type DeleteTarget struct {
 // directly off the cursor so very large result sets never materialise.
 // visit returning a non-nil error aborts iteration.
 func ExecuteForDeleteStream(database *db.DB, expr Expr, visit func(DeleteTarget) error) error {
+	return streamScope(database, expr, "ORDER BY i.id", visit)
+}
+
+// ExecuteForScopeStream is ExecuteForDeleteStream walked in the order the
+// gallery renders, for the jobs whose result depends on each row's position
+// in the scope rather than only on the set. The others keep the id order:
+// a sort with no covering index temp-sorts the whole match set, and they
+// would pay it for a sequence nothing reads.
+func ExecuteForScopeStream(database *db.DB, expr Expr, sort, order string, randomSeed int64, visit func(DeleteTarget) error) error {
+	return streamScope(database, expr, buildOrder(sort, order, randomSeed), visit)
+}
+
+// Scope names a set of images by query rather than by id: an expression
+// with any ceiling already applied, plus the order a consumer that cares
+// about position needs. It exists so the id set behind "act on the
+// current search" is one value the caller hands around, rather than a
+// stream every caller re-materialises its own way.
+type Scope struct {
+	Expr Expr
+	// ViewOrder walks the set in the order the gallery renders instead of
+	// by id, for the jobs whose result depends on each row's position.
+	ViewOrder  bool
+	Sort       string
+	Order      string
+	RandomSeed int64
+}
+
+// IDs materialises the scope. The caller owns the ceiling: an expression
+// that did not have one applied selects rows the operator cannot see.
+func (sc Scope) IDs(database *db.DB) ([]int64, error) {
+	var ids []int64
+	collect := func(t DeleteTarget) error {
+		ids = append(ids, t.ID)
+		return nil
+	}
+	if sc.ViewOrder {
+		return ids, ExecuteForScopeStream(database, sc.Expr, sc.Sort, sc.Order, sc.RandomSeed, collect)
+	}
+	return ids, ExecuteForDeleteStream(database, sc.Expr, collect)
+}
+
+func streamScope(database *db.DB, expr Expr, orderBy string, visit func(DeleteTarget) error) error {
 	driverLegs, _ := pickAndDriverTag(database, expr, false)
 	where, args, hasMissingFilter, _ := buildWhereDBDriverFull(expr, database, driverLegs)
 	where, args = applyAndDriver(where, args, driverLegs)
 	where = andDefaultVisible(where, hasMissingFilter)
 
 	rows, err := database.Read.Query(
-		"SELECT i.id, i.canonical_path, i.folder_path, i.is_missing FROM images i WHERE "+where+" ORDER BY i.id",
+		"SELECT i.id, i.canonical_path, i.folder_path, i.is_missing FROM images i WHERE "+where+" "+orderBy,
 		args...,
 	)
 	if err != nil {

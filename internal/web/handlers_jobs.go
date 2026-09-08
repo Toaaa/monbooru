@@ -27,7 +27,7 @@ func (s *Server) jobStatusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) syncTrigger(w http.ResponseWriter, r *http.Request) {
-	if cx := s.Active(); cx == nil || cx.Degraded {
+	if cx := s.active(); cx == nil || cx.Degraded {
 		// Same escaped-fragment shape as the busy-job refusal below it:
 		// the topbar swaps this body straight into #sync-flash.
 		flashStatus(w, http.StatusServiceUnavailable, "Sync unavailable: gallery path is unreadable.")
@@ -38,9 +38,9 @@ func (s *Server) syncTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	// Snapshot the active gallery's state under the request's RLock so the
 	// background goroutine is not racing a subsequent swap. The IsRunning
-	// guard in SwitchGallery refuses swaps while the sync runs, so these
+	// guard in switchGallery refuses swaps while the sync runs, so these
 	// handles stay valid for the job's lifetime.
-	cx := s.Active()
+	cx := s.active()
 	maxFileSizeMB := s.maxFileSizeMB()
 	go func() {
 		ctx := s.jobs.Context()

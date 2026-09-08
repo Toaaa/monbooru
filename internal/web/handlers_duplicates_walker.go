@@ -51,9 +51,7 @@ type relationsWalkerData struct {
 
 // HasRows reports whether the walk found anything, which is what gates the
 // delete-all toolbar. Only one of the two slices is ever populated.
-func (d relationsWalkerData) HasRows() bool {
-	return len(d.Sha256Rows) > 0 || len(d.MarkedRows) > 0
-}
+func (d relationsWalkerData) HasRows() bool { return len(d.Sha256Rows) > 0 || len(d.MarkedRows) > 0 }
 
 // duplicatesWalkerPageSize caps each walker page. A find-pairs run can
 // mark tens of thousands of members on a large library, and both tables
@@ -258,7 +256,7 @@ func (s *Server) sha256WalkerRemoveOnePost(w http.ResponseWriter, r *http.Reques
 		flashStatus(w, http.StatusNotFound, "Not a non-canonical path.")
 		return
 	}
-	if _, err := s.db().Write.Exec(`DELETE FROM image_paths WHERE id = ?`, pathID); err != nil {
+	if err := gallery.DeleteAliasPath(s.db(), pathID); err != nil {
 		flashStatus(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -286,7 +284,7 @@ func (s *Server) markedWalkerDeleteOnePost(w http.ResponseWriter, r *http.Reques
 		flashStatus(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	redirectWalker(w, r, "marked")
 }
 
@@ -340,7 +338,7 @@ func (s *Server) markedWalkerDeleteAllPost(w http.ResponseWriter, r *http.Reques
 		for i, id := range victims {
 			if ctx.Err() != nil {
 				s.jobs.Complete(fmt.Sprintf("marked delete-all cancelled (%d/%d)", removed, total))
-				s.Active().InvalidateCaches()
+				s.active().InvalidateCaches()
 				return
 			}
 			if _, err := gallery.DeleteImage(s.db(), galleryPath, thumbnailsPath, id, tags.RemoveAllTagsFromImageTx, onDelete); err != nil {
@@ -352,7 +350,7 @@ func (s *Server) markedWalkerDeleteAllPost(w http.ResponseWriter, r *http.Reques
 				s.jobs.Update(i+1, total, "removing…")
 			}
 		}
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 		s.jobs.Complete(fmt.Sprintf("Removed %d marked duplicate(s).", removed))
 	}()
 	writeInlineFlash(w, "ok", "Marked duplicate removal started.")

@@ -1,0 +1,7 @@
+{{define "partials/category_select.html"}}
+      <select {{if .Name}}name="{{.Name}}" {{end}}id="{{.ID}}">
+        {{range .Categories}}{{if ne .Name "rating"}}
+        <option value="{{.ID}}">{{.Name}}</option>
+        {{end}}{{end}}
+      </select>
+{{end}}

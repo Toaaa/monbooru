@@ -6,8 +6,6 @@
 <div id="gallery-header">
   <form id="search-form" hx-get="/" hx-target="#gallery-grid" hx-push-url="true" hx-swap="innerHTML">
     {{template "partials/search_input.html" .Query}}
-    {{/* Applied on change: the select showing a sort the grid is not in
-         reads as a broken grid, not as a pending edit. */}}
     {{template "partials/sort_select.html" .}}
     <select name="order" aria-label="Sort direction" onchange="submitSearch()">
       <option value="desc" {{if eq .Order "desc"}}selected{{end}}>↓</option>
@@ -21,17 +19,19 @@
             onclick="applyRandomSort()" title="{{if eq .Sort "random"}}Re-shuffle{{else}}Random order{{end}} (R)">⇄</button>
   </form>
   <div id="save-search-area">{{template "partials/save_search_area.html" .}}</div>
+  <button type="button" id="select-mode-btn" aria-pressed="false" onclick="toggleSelectMode()" title="Select mode (V)">Select mode</button>
 </div>
 
 <div id="gallery-flash"></div>
 <div id="search-warning">{{if .SearchWarning}}<span class="field-hint">{{.SearchWarning}}</span>{{end}}</div>
 
-<div id="gallery-status" class="status-bar"><span id="result-count" class="result-count">{{.Result.Total}}</span> {{plural .Result.Total "match" "matches"}}</div>
+{{template "partials/gallery_status.html" .}}
 
-<div id="batch-bar" class="batch-bar hidden">
-  <button onclick="selectAll()">Select all</button>
-  <button onclick="clearSelection()">Cancel</button>
-  <span id="batch-count">0 selected</span>
+<div id="batch-bars">
+<div id="batch-bar" class="batch-bar" hidden>
+  <button onclick="selectAll()">Select page</button>
+  <button id="batch-invert" onclick="invertSelection()">Invert</button>
+  <button id="batch-cancel" onclick="clearSelection()">Cancel</button>
   <form id="batch-delete-form">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <span class="batch-bar-spacer"></span>
@@ -44,26 +44,23 @@
     <button type="button" onclick="openBatchFavoriteDialog('selection')">Favorite</button>
     <button type="button" onclick="openBatchCollectionDialog('selection')">Set collection</button>
     <span class="batch-bar-sep" aria-hidden="true"></span>
-    {{if gt (len .Galleries) 1}}<button type="button" onclick="openBatchTransferDialog('selection')">Transfer</button>{{end}}
-    <button type="button" onclick="openBatchRenameDialog('selection')">Rename</button>
-    <button type="button" onclick="openBatchMoveDialog('selection')">Move</button>
+    {{if gt (len .Galleries) 1}}<button type="button" id="batch-transfer" onclick="openBatchTransferDialog('selection')">Transfer</button>{{end}}
+    <button type="button" onclick="openBatchPlaceDialog('selection')">Rename / move</button>
     <button type="button" class="btn-danger" onclick="batchDeleteSelected()">Delete</button>
   </form>
 </div>
 
-{{/* A second bar so the built-in one keeps its layout; it shows and hides
-     with the selection it inherits its scope from. */}}
 {{if .PluginSlot.Any}}
-<div id="plugin-batch-bar">
+<div id="plugin-batch-bar" hidden>
   {{template "partials/plugin_buttons.html" .PluginSlot}}
 </div>
 {{end}}
+</div>
 
 <div id="gallery-grid">
 {{template "partials/thumbnail_grid.html" .}}
 </div>
 
-<!-- Save search dialog -->
 <dialog id="save-search-dialog">
   <form hx-post="/search/saved"
         hx-target="#save-search-result"
@@ -80,16 +77,10 @@
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.closest('form').requestSubmit();}">
     </div>
     <div id="save-search-result"></div>
-    <div class="dialog-actions">
-      <button type="submit">Save</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('save-search-dialog')">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "save-search-dialog" "Submit" "Save"}}
   </form>
 </dialog>
 
-<!-- Delete dialog (scope flip via hidden #batch-delete-scope; the
-     dataset.returnTo marker on the chooser path pops Escape back to the
-     chooser, the batch-bar path leaves it cleared). -->
 <dialog id="batch-delete-dialog">
   <input type="hidden" id="batch-delete-scope">
   <p>Delete {{template "batch_count" "batch-delete"}}?</p>
@@ -97,32 +88,10 @@
   <div id="batch-delete-flash"></div>
   <div class="dialog-actions">
     <button type="button" class="btn-danger" onclick="confirmBatchDelete()">Delete</button>
-    <button type="button" onclick="closeDialogAndRestoreParent('batch-delete-dialog')">Cancel</button>
+    <button type="button" autofocus onclick="document.getElementById('batch-delete-dialog').close()">Cancel</button>
   </div>
 </dialog>
 
-<!-- Actions chooser. Density-relief surface: every search-scoped operation
-     hangs off this one button. Picking an entry closes the chooser and opens
-     the matching action dialog (close-then-open, not innerHTML swap). The
-     scope is announced once by the dialog header; each entry's label is
-     just the action verb. Number keys 1-9 pick the corresponding visible
-     entry (assigned dynamically at open time). The `a` shortcut in main.js
-     opens this chooser.
-     Each <button> carries data-action so openBatchActionsDialog can wire
-     onclick once and update visibility on every open without rebinding. -->
-<dialog id="batch-actions-dialog">
-  {{/* Body wrapped in #batch-actions-body so HTMX search responses can OOB-swap
-       the entries when .Query / .Result.Total change without disturbing the
-       <dialog> wrapper or its open state. */}}
-  <div id="batch-actions-body">{{template "partials/batch_actions_body.html" .}}</div>
-  <div class="dialog-actions">
-    <button type="button" onclick="document.getElementById('batch-actions-dialog').close()">Cancel</button>
-  </div>
-</dialog>
-
-<!-- Add-tags dialog (shared by chooser's "Add tags" and the batch-bar's
-     Add-tags button). op is hardcoded to "add" - bulk-strip lives in
-     #batch-strip-dialog instead. -->
 <dialog id="batch-tag-dialog">
   <p>
     Add tags to <strong id="batch-tag-count-display"></strong>
@@ -145,17 +114,11 @@
       <div id="batch-tag-suggest" class="suggest-dropdown tag-suggest-dropdown"></div>
     </div>
     <div id="batch-tag-flash"></div>
-    <div class="dialog-actions">
-      <button type="submit">Apply</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('batch-tag-dialog')">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "batch-tag-dialog" "Submit" "Apply"}}
   </form>
 </dialog>
 
 {{if .EnabledTaggers}}
-<!-- Auto-tag dialog (scope flip via hidden #batch-autotag-scope). Posts
-     /internal/autotag with q/sort/order for search scope; ids[] for
-     selection scope. -->
 <dialog id="batch-autotag-dialog">
   <p>
     Auto-tag {{template "batch_count" "batch-autotag"}}. Pick which tagger to run.
@@ -168,22 +131,11 @@
       {{range .EnabledTaggers}}<label style="display:block"><input type="radio" name="tagger_name" value="{{.Name}}"> {{.Name}}</label>{{end}}
     </div>
     <div id="batch-autotag-flash"></div>
-    <div class="dialog-actions">
-      <button type="submit" class="btn-autotag">Auto-tag</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('batch-autotag-dialog')">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "batch-autotag-dialog" "Submit" "Auto-tag" "Class" "btn-autotag"}}
   </form>
 </dialog>
 {{end}}
 
-<!-- Remove tags dialog (shared by chooser's "Remove tags" and the batch-bar's
-     Remove-tags button). Five radio modes:
-       specific            → POST /internal/batch-tag with op=remove + tags=...
-       user / auto / all   → POST /internal/batch-strip with the matching predicate
-                             (is_auto=0 / is_auto=1 / no extra clause).
-       auto + tagger_name  → mode=auto plus a single tagger filter (the
-                             "Specific auto-tagger" entry sets the same form
-                             field and adds tagger_name to the body). -->
 <dialog id="batch-strip-dialog">
   <p>
     Remove tags from <strong id="batch-strip-count-display"></strong>
@@ -209,7 +161,7 @@
       <label style="display:block"><input type="radio" name="mode" value="source-specific"> Specific source</label>
       <div class="field" style="margin: 4px 0 8px 22px" id="batch-strip-source-row">
         <select name="source" id="batch-strip-source" class="upload-wide-input">
-          {{range .SourceLabelCounts}}<option value="{{.Source}}">{{.Source}} ({{.Count}})</option>{{end}}
+          {{range .SourceLabelCounts}}<option value="{{.Source}}">{{.Source}}</option>{{end}}
         </select>
       </div>
       {{end}}
@@ -228,74 +180,54 @@
       <label style="display:block"><input type="radio" name="mode" value="all"> All tags</label>
     </div>
     <div id="batch-strip-flash"></div>
-    <div class="dialog-actions">
-      <button type="submit" class="btn-warning">Remove</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('batch-strip-dialog')">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "batch-strip-dialog" "Submit" "Remove" "Class" "btn-warning"}}
   </form>
 </dialog>
 
-<!-- Rename dialog (scope flip via hidden #batch-rename-scope). -->
-<dialog id="batch-rename-dialog">
-  <p>Rename {{template "batch_count" "batch-rename"}}:</p>
-  <p class="field-hint">Plain text numbers the scope in order: name01.ext, name02.ext, ... A template with tokens names each file on its own. Extensions are kept.</p>
-  <form id="batch-rename-form" onsubmit="event.preventDefault(); confirmBatchRename();">
+<dialog id="batch-place-dialog">
+  <p>Rename / move {{template "batch_count" "batch-place"}}:</p>
+  <p class="field-hint">A plain name numbers the scope in order: name01.ext, name02.ext, ... A template with tokens names each file on its own. Extensions are kept.</p>
+  <form id="batch-place-form" onsubmit="event.preventDefault(); confirmBatchPlace();">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-    <input type="hidden" id="batch-rename-scope">
+    <input type="hidden" id="batch-place-scope">
     <div class="field">
-      <input type="text" name="name" id="batch-rename-name" class="upload-wide-input"
-             placeholder="Base name or template..." required autocomplete="off">
-      {{template "partials/name_tokens.html" (dict "Target" "batch-rename-name" "Batch" true)}}
-      <div id="batch-rename-preview"
+      <div class="dest-row">
+        <div class="dest-part">
+          <label for="batch-place-folder">folder</label>
+          <input type="text" name="folder" id="batch-place-folder" autocomplete="off"
+                 hx-get="/internal/folders/suggest"
+                 hx-trigger="input changed delay:200ms"
+                 hx-target="#batch-place-suggest"
+                 hx-swap="innerHTML"
+                 hx-vals='js:{prefix: document.getElementById("batch-place-folder").value}'
+                 onkeydown="handleSuggestKey(event, 'batch-place-suggest', 'batch-place-folder')">
+          <div id="batch-place-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
+        </div>
+        <span class="dest-sep" aria-hidden="true">/</span>
+        <div class="dest-part">
+          <label for="batch-place-name">name</label>
+          <input type="text" name="name" id="batch-place-name" placeholder="(keep each name)" autocomplete="off">
+        </div>
+      </div>
+      <div class="dest-hints">
+        <span class="field-hint">Blank = the gallery root.</span>
+        <span class="field-hint">Blank = the name it has.</span>
+      </div>
+      {{template "partials/name_tokens.html" (dict "Targets" "batch-place-folder batch-place-name" "Batch" true "Folder" true)}}
+      <div id="batch-place-preview"
            hx-get="/internal/name/preview"
-           hx-trigger="input delay:200ms from:#batch-rename-name"
+           hx-trigger="input delay:200ms from:#batch-place-folder, input delay:200ms from:#batch-place-name, preview"
            hx-target="this"
-           hx-vals='js:{...namePreviewVals("batch-rename-name", "rename-batch", "batch-rename-scope")}'
+           hx-vals='js:{...namePreviewVals("batch-place", "place-batch")}'
            hx-swap="innerHTML"></div>
+      <button type="button" class="name-preview-more" id="batch-place-check"
+              onclick="checkBatchPlaceCollisions()">check the whole scope for taken names</button>
     </div>
-    <div id="batch-rename-flash"></div>
-    <div class="dialog-actions">
-      <button type="submit">Rename</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('batch-rename-dialog')">Cancel</button>
-    </div>
+    <div id="batch-place-flash"></div>
+    {{template "dialog_actions" dict "ID" "batch-place-dialog" "Submit" "Rename / move"}}
   </form>
 </dialog>
 
-<!-- Move dialog (scope flip via hidden #batch-move-scope). -->
-<dialog id="batch-move-dialog">
-  <p>Move {{template "batch_count" "batch-move"}} to folder:</p>
-  <p class="field-hint">Path (leave blank for gallery root)</p>
-  <form id="batch-move-form" onsubmit="event.preventDefault(); confirmBatchMove();">
-    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-    <input type="hidden" id="batch-move-scope">
-    <div class="field" style="position:relative">
-      <input type="text" name="folder" id="batch-move-folder" class="upload-wide-input"
-             placeholder="Destination path..." autocomplete="off"
-             hx-get="/internal/folders/suggest"
-             hx-trigger="input changed delay:200ms"
-             hx-target="#batch-move-suggest"
-             hx-swap="innerHTML"
-             hx-vals='js:{prefix: document.getElementById("batch-move-folder").value}'
-             onkeydown="handleSuggestKey(event, 'batch-move-suggest', 'batch-move-folder')">
-      <div id="batch-move-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
-      {{template "partials/name_tokens.html" (dict "Target" "batch-move-folder" "Batch" true)}}
-      <div id="batch-move-preview"
-           hx-get="/internal/name/preview"
-           hx-trigger="input delay:200ms from:#batch-move-folder"
-           hx-target="this"
-           hx-vals='js:{...namePreviewVals("batch-move-folder", "move-batch", "batch-move-scope")}'
-           hx-swap="innerHTML"></div>
-    </div>
-    <div id="batch-move-flash"></div>
-    <div class="dialog-actions">
-      <button type="submit">Move</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('batch-move-dialog')">Cancel</button>
-    </div>
-  </form>
-</dialog>
-
-<!-- Transfer dialog: copy the scope into another gallery (scope flip via hidden
-     #batch-transfer-scope). -->
 <dialog id="batch-transfer-dialog">
   <p>Transfer {{template "batch_count" "batch-transfer"}} to another gallery:</p>
   <p class="field-hint">The image and its tags, sources and notes are copied into the target gallery.</p>
@@ -313,15 +245,10 @@
       <label><input type="checkbox" name="remove_after" id="batch-transfer-remove" value="1"> Remove from this gallery after transfer</label>
     </div>
     <div id="batch-transfer-flash"></div>
-    <div class="dialog-actions">
-      <button type="submit">Transfer</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('batch-transfer-dialog')">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "batch-transfer-dialog" "Submit" "Transfer"}}
   </form>
 </dialog>
 
-<!-- Batch inbox dialog. Per-row toggle: each image flips between inbox
-     and archived, regardless of starting state. -->
 <dialog id="batch-inbox-dialog">
   <input type="hidden" id="batch-inbox-scope">
   <p>
@@ -332,7 +259,7 @@
   <div id="batch-inbox-flash"></div>
   <div class="dialog-actions">
     <button type="button" onclick="confirmBatchInbox()">Apply</button>
-    <button type="button" onclick="closeDialogAndRestoreParent('batch-inbox-dialog')">Cancel</button>
+    <button type="button" onclick="document.getElementById('batch-inbox-dialog').close()">Cancel</button>
   </div>
 </dialog>
 
@@ -346,12 +273,10 @@
   <div id="batch-fav-flash"></div>
   <div class="dialog-actions">
     <button type="button" onclick="confirmBatchFavorite()">Apply</button>
-    <button type="button" onclick="closeDialogAndRestoreParent('batch-fav-dialog')">Cancel</button>
+    <button type="button" onclick="document.getElementById('batch-fav-dialog').close()">Cancel</button>
   </div>
 </dialog>
 
-<!-- Set-collection dialog (scope flip via hidden #batch-collection-scope).
-     The input drives /internal/collection/suggest autocomplete. -->
 <dialog id="batch-collection-dialog">
   <p>Set collection for {{template "batch_count" "batch-collection"}}:</p>
   <form id="batch-collection-form" onsubmit="event.preventDefault(); confirmBatchCollection();">
@@ -368,19 +293,10 @@
 {{template "suggest_input" dict "Name" "collection" "InputID" "batch-collection-input" "Endpoint" "/internal/collection/suggest" "SuggestID" "batch-collection-suggest"}}
     </div>
     <div id="batch-collection-flash"></div>
-    <div class="dialog-actions">
-      <button type="submit">Apply</button>
-      <button type="button" onclick="closeDialogAndRestoreParent('batch-collection-dialog')">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "batch-collection-dialog" "Submit" "Apply"}}
   </form>
 </dialog>
 
-<!-- Batch lookup dialog. Operation-first: refreshing sources you already
-     have and discovering ones you do not are unrelated jobs, and the
-     backends under a hash lookup are independent with different costs, so
-     they are checkboxes that state their own. The scope narrowing is what
-     keeps a 1,240-image search from queueing 812 lookups for images that
-     already carry a source. -->
 <dialog id="batch-lookup-dialog">
   <input type="hidden" id="batch-lookup-scope">
   <p>
@@ -409,7 +325,7 @@
   <div id="batch-lookup-flash"></div>
   <div class="dialog-actions">
     <button type="button" id="batch-lookup-submit" onclick="confirmBatchLookup()">Find tags</button>
-    <button type="button" onclick="closeDialogAndRestoreParent('batch-lookup-dialog')">Cancel</button>
+    <button type="button" onclick="document.getElementById('batch-lookup-dialog').close()">Cancel</button>
   </div>
 </dialog>
 
@@ -509,7 +425,8 @@ function confirmBatchDelete() {
   var scope = document.getElementById('batch-delete-scope').value;
   if (scope === 'search') {
     runBatchOp({endpoint: '/internal/delete-search', scope: 'search', params: searchScopeParts(),
-                dialogId: 'batch-delete-dialog', flashId: 'batch-delete-flash', failMsg: 'Delete failed.'});
+                dialogId: 'batch-delete-dialog', flashId: 'batch-delete-flash', failMsg: 'Delete failed.',
+                consumesScope: true});
     return;
   }
   var ids = selectionScopeIds();
@@ -518,33 +435,51 @@ function confirmBatchDelete() {
     return;
   }
   runBatchOp({endpoint: '/internal/batch-delete', scope: 'selection', params: ids,
-              dialogId: 'batch-delete-dialog', flashId: 'batch-delete-flash', failMsg: 'Delete failed.'});
+              dialogId: 'batch-delete-dialog', flashId: 'batch-delete-flash', failMsg: 'Delete failed.',
+              consumesScope: true});
 }
 
-function openBatchRenameDialog(scope) {
-  openBatchDialog('batch-rename', scope, {
-    clearIds: ['batch-rename-name', 'batch-rename-preview'],
-    focusId: 'batch-rename-name'
+// The folder opens on {folder} rather than blank: a batch spans folders, so
+// only a token can say "leave each file where it is", and a blank field
+// already means the gallery root everywhere else.
+function openBatchPlaceDialog(scope) {
+  openBatchDialog('batch-place', scope, {
+    clearIds: ['batch-place-folder', 'batch-place-name', 'batch-place-suggest', 'batch-place-preview'],
+    beforeShow: function() {
+      document.getElementById('batch-place-folder').value = '{folder}';
+      delete document.getElementById('batch-place-preview').dataset.rows;
+    },
+    focusId: 'batch-place-name'
   });
 }
 
-function confirmBatchRename() {
-  var name = document.getElementById('batch-rename-name').value;
-  confirmBatchSimple('batch-rename', '/internal/batch-rename',
-    ['name=' + encodeURIComponent(name)], 'Rename failed.');
+function batchPlaceParams() {
+  return ['folder=' + encodeURIComponent(document.getElementById('batch-place-folder').value),
+          'name=' + encodeURIComponent(document.getElementById('batch-place-name').value)];
 }
 
-function openBatchMoveDialog(scope) {
-  openBatchDialog('batch-move', scope, {
-    clearIds: ['batch-move-folder', 'batch-move-suggest', 'batch-move-preview'],
-    focusId: 'batch-move-folder'
+function confirmBatchPlace() {
+  confirmBatchSimple('batch-place', '/internal/batch-place', batchPlaceParams(),
+    'Rename / move failed.');
+}
+
+// The preview above the button samples the scope; this walks all of it and
+// writes nothing, so a template that names hundreds of files the same is
+// caught before the run numbers them apart. The dialog stays open on the
+// template being checked, and the job's answer is mirrored into it.
+function checkBatchPlaceCollisions() {
+  var scope = document.getElementById('batch-place-scope').value;
+  var flash = document.getElementById('batch-place-flash');
+  var scoped = batchScopeParams(scope, flash);
+  if (!scoped) return;
+  var parts = ['scope=' + encodeURIComponent(scope), 'check=1']
+    .concat(batchPlaceParams()).concat(scoped);
+  setFlashText(flash, 'ok', 'Checking the whole scope...');
+  postForm('/internal/batch-place', new URLSearchParams(parts.join('&')), {
+    flashId: 'batch-place-flash',
+    failMsg: 'Check failed.',
+    onOK: function() { refreshJobStatus(); mirrorJobSummary('batch-place-flash'); }
   });
-}
-
-function confirmBatchMove() {
-  var folder = document.getElementById('batch-move-folder').value;
-  confirmBatchSimple('batch-move', '/internal/batch-move',
-    ['folder=' + encodeURIComponent(folder)], 'Move failed.');
 }
 
 function openBatchTransferDialog(scope) {
@@ -568,145 +503,15 @@ function confirmBatchTransfer() {
   confirmBatchSimple('batch-transfer', '/internal/batch-transfer', params, 'Transfer failed.');
 }
 
-// Open the Actions chooser. The header announces the scope once (count +
-// noun); each entry's label is just the verb. Each visible entry gets a
-// leading "[N] " prefix so the 1-9 number keys are discoverable without a
-// tooltip. Auto-focuses the first visible entry.
-function openBatchActionsDialog() {
-  var dlg = document.getElementById('batch-actions-dialog');
-  if (!dlg) return;
-  var rcEl = document.querySelector('.result-count');
-  var n = 0;
-  if (rcEl) {
-    var m = rcEl.textContent.match(/(\d+)/);
-    if (m) n = parseInt(m[1], 10);
-  }
-  document.getElementById('batch-actions-count').textContent = n;
-  document.getElementById('batch-actions-noun').textContent = n === 1 ? 'image' : 'images';
-
-  var items = dlg.querySelectorAll('li.actions-menu-item');
-  items.forEach(function(li, idx) {
-    var btn = li.querySelector('button');
-    if (!btn) return;
-    var pos = idx + 1;
-    btn.dataset.shortcut = pos <= 9 ? String(pos) : '';
-    if (!btn.dataset.label) btn.dataset.label = btn.textContent;
-    if (pos <= 9) {
-      btn.textContent = '[' + pos + '] ' + btn.dataset.label;
-    } else {
-      btn.textContent = btn.dataset.label;
-    }
-    btn.onclick = function() { pickBatchAction(btn.dataset.action); };
-  });
-  dlg.showModal();
-  var first = items[0] && items[0].querySelector('button');
-  if (first) first.focus();
-}
-
-// Wire number keys 1-9 plus ArrowUp/ArrowDown inside the chooser. Bound on
-// the dialog so it only fires while the chooser is open; closes don't leave
-// the listener around. Arrow keys cycle focus across the entry buttons with
-// clamp-at-ends, matching the suggest-dropdown shape in handleSuggestKey.
-(function () {
-  var dlg = document.getElementById('batch-actions-dialog');
-  if (!dlg) return;
-  dlg.addEventListener('keydown', function (e) {
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      var items = Array.prototype.slice.call(dlg.querySelectorAll('li.actions-menu-item button'));
-      if (items.length === 0) return;
-      var idx = items.indexOf(document.activeElement);
-      if (idx < 0) idx = 0;
-      else if (e.key === 'ArrowDown') idx = Math.min(idx + 1, items.length - 1);
-      else idx = Math.max(idx - 1, 0);
-      e.preventDefault();
-      items[idx].focus();
-      return;
-    }
-    if (e.key < '1' || e.key > '9') return;
-    var btn = dlg.querySelector('button[data-shortcut="' + e.key + '"]');
-    if (!btn) return;
-    e.preventDefault();
-    btn.click();
-  });
-})();
-
-function pickBatchAction(action) {
-  var dlg = document.getElementById('batch-actions-dialog');
-  if (dlg) dlg.close();
-  var subId = '';
-  switch (action) {
-    case 'save':
-      openSaveSearchDialog();
-      subId = 'save-search-dialog';
-      break;
-    case 'add':
-      openTagSearchDialog('add');
-      subId = 'batch-tag-dialog';
-      break;
-    case 'strip':
-      openStripSearchDialog();
-      subId = 'batch-strip-dialog';
-      break;
-    case 'autotag':
-      openBatchAutotagDialog('search');
-      subId = 'batch-autotag-dialog';
-      break;
-    case 'transfer':
-      openBatchTransferDialog('search');
-      subId = 'batch-transfer-dialog';
-      break;
-    case 'rename':
-      openBatchRenameDialog('search');
-      subId = 'batch-rename-dialog';
-      break;
-    case 'move':
-      openBatchMoveDialog('search');
-      subId = 'batch-move-dialog';
-      break;
-    case 'inbox-toggle':
-      openBatchInboxDialog('search');
-      subId = 'batch-inbox-dialog';
-      break;
-    case 'fav-toggle':
-      openBatchFavoriteDialog('search');
-      subId = 'batch-fav-dialog';
-      break;
-    case 'collection':
-      openBatchCollectionDialog('search');
-      subId = 'batch-collection-dialog';
-      break;
-    case 'lookup':
-      openBatchLookupDialog('search');
-      subId = 'batch-lookup-dialog';
-      break;
-    case 'delete':
-      openBatchDeleteDialog('search');
-      subId = 'batch-delete-dialog';
-      break;
-  }
-  // Mark the sub-dialog so Escape / Cancel pop one level back to the chooser
-  // instead of dropping out to the gallery. Cleared by the batch-bar open
-  // paths on shared dialogs (#batch-tag-dialog, #batch-strip-dialog) so the
-  // marker doesn't linger across non-chooser opens.
-  if (subId) {
-    var sub = document.getElementById(subId);
-    if (sub) sub.dataset.returnTo = 'batch-actions-dialog';
-  }
-}
-
-// Open the Remove-tags dialog. On a search-scope submit the body carries
-// scope=search plus q/sort/order so the handler streams matching ids
-// through search.ExecuteForDeleteStream. beforeShow re-syncs the mode
-// rows before the dialog opens so showModal's initial focus doesn't land
-// on a field left disabled by the previous open's mode.
-function openStripSearchDialog() { openStripDialog('search'); }
+// Open the Remove-tags dialog. beforeShow re-syncs the mode rows before the
+// dialog opens so showModal's initial focus doesn't land on a field left
+// disabled by the previous open's mode.
 function openStripSelectedDialog() { openStripDialog('selection'); }
 function openStripDialog(scope) {
   openBatchDialog('batch-strip', scope, {
     countId: 'batch-strip-count-display',
     radio: '#batch-strip-form input[name="mode"][value="specific"]',
     clearIds: ['batch-strip-input', 'batch-strip-suggest'],
-    clearReturnTo: true,
     beforeShow: updateBatchStripRow
   });
 }
@@ -810,16 +615,13 @@ function confirmBatchAutotag() {
     ['tagger_name=' + encodeURIComponent(tagger)], 'Auto-tag failed.');
 }
 
-// Open the Add-tags dialog scoped to the current search or the checked
-// thumbnails; the selection variant reads ids from .thumb-checkbox:checked
-// at submit.
-function openTagSearchDialog() { openTagDialog('search'); }
+// Open the Add-tags dialog on the checked thumbnails; ids are read from
+// .thumb-checkbox:checked at submit.
 function openTagSelectedDialog() { openTagDialog('selection'); }
 function openTagDialog(scope) {
   openBatchDialog('batch-tag', scope, {
     countId: 'batch-tag-count-display',
     clearIds: ['batch-tag-input', 'batch-tag-suggest'],
-    clearReturnTo: true,
     focusId: 'batch-tag-input'
   });
 }

@@ -30,12 +30,12 @@ func (s *Server) pluginMount(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.plugin(name)
 	base := s.pluginBase(p)
 	if !ok || p.PeerToken == "" || base == "" {
-		http.NotFound(w, r)
+		s.renderNotFound(w, r)
 		return
 	}
 	target, err := url.Parse(base)
 	if err != nil {
-		http.NotFound(w, r)
+		s.renderNotFound(w, r)
 		return
 	}
 	mount := pluginMountBase(name)
@@ -55,7 +55,7 @@ func (s *Server) pluginMount(w http.ResponseWriter, r *http.Request) {
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			s.markPluginDown(name)
+			s.peers.MarkDown(name)
 			logx.Warnf("plugin %s: serving %s: %v", name, r.URL.Path, err)
 			http.Error(w, "plugin "+name+" did not answer", http.StatusBadGateway)
 		},

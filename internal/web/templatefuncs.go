@@ -260,11 +260,10 @@ var cancelTitles = map[string]string{
 	"lookup":         "Stop the lookup",
 	"move":           "Stop moving",
 	"tag":            "Stop tagging",
+	"check":          "Stop the check",
 }
 
-func cancelTitle(jobType string) string {
-	return cmp.Or(cancelTitles[jobType], "Stop")
-}
+func cancelTitle(jobType string) string { return cmp.Or(cancelTitles[jobType], "Stop") }
 
 // runningJobNames names a job inside a sentence, where cancelTitles names
 // it on a button. The values open the sentence, so they carry their own
@@ -276,6 +275,7 @@ var runningJobNames = map[string]string{
 	"re-extract":     "A re-extraction",
 	"rebuild-thumbs": "A thumbnail rebuild",
 	"prune-thumbs":   "A thumbnail prune",
+	"prune-dirs":     "A folder prune",
 	"hashes":         "A hash backfill",
 	"relations":      "A find-pairs run",
 	"lookup":         "A lookup",
@@ -285,11 +285,10 @@ var runningJobNames = map[string]string{
 	"vacuum":         "A vacuum",
 	"free-memory":    "A memory reclaim",
 	"fold":           "A fold",
+	"check":          "A check",
 }
 
-func runningJobName(jobType string) string {
-	return cmp.Or(runningJobNames[jobType], "A job")
-}
+func runningJobName(jobType string) string { return cmp.Or(runningJobNames[jobType], "A job") }
 
 // browseSortLabels names each /relations/browse sort for its button; an
 // unmapped value renders as itself.

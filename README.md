@@ -95,16 +95,18 @@ contribute back`"| loader
 
 Edit the volume paths in [`docker/docker-compose.yml`](docker/docker-compose.yml), then `docker compose up -d`. The app is available at `http://localhost:8455`.
 
-See the monbooru documentation for help. In-app, type `system:` in the search bar for the syntax cheat-sheet and press `?` for the keyboard shortcuts; the footer's `help` link opens the documentation.
+## Quick start (Binaries)
 
-## Quick start (desktop)
-
-Download a **desktop** build for your system from the [releases](https://github.com/monbooru/monbooru/releases), unpack it, and run it. It opens a browser at `http://localhost:8455`.
+Download a build for your system from the [releases](https://github.com/monbooru/monbooru/releases), unpack it, and run it. The app is available at `http://localhost:8455`.
 
 Downloads come on two axes:
 
 - **desktop** or **server**. Desktop is the same as Server except it manages setup, paths, tray, shortcuts, start and stop in a way that is more friendly for desktop only users.
 - **lite** or **bundled**. Lite is a single binary. Bundled carries ffmpeg and the ONNX Runtime beside it, so video thumbnails and local auto-tagging work with nothing else installed.
+
+On Linux the desktop bundled build also ships as an AppImage and as a Flatpak, each one file.
+
+See the monbooru documentation for help. In-app, type `system:` in the search bar for the syntax cheat-sheet and press `?` for the keyboard shortcuts; the footer's `help` link opens the documentation.
 
 ---
 
@@ -116,7 +118,7 @@ Downloads come on two axes:
 
 ## Acknowledgements
 
-This section covers monbooru and its companion repos ([monloader](https://github.com/monbooru/monloader), [monsender](https://github.com/monbooru/monsender), [mondocs](https://github.com/monbooru/mondocs), [monbooru-plugins](https://github.com/monbooru/monbooru-plugins)).
+This section covers monbooru and its companion repos ([monloader](https://github.com/monbooru/monloader), [monsender](https://github.com/monbooru/monsender), [mondocs](https://github.com/monbooru/mondocs), [monbooru-plugins](https://github.com/monbooru/monbooru-plugins).
 
 Thanks to [@gary-host-laptop](https://github.com/gary-host-laptop) and [@CeareDelafont](https://github.com/CeareDelafont) for sustained contributions over time. Every shipped contribution is credited in the release that ships it; see [CONTRIBUTING](CONTRIBUTING.md).
 
@@ -125,7 +127,7 @@ This project is built on the work of others:
 - [htmx](https://htmx.org/) powers the server-rendered UI.
 - [SQLite](https://sqlite.org/), through the pure-Go [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) driver, stores each gallery.
 - [ONNX Runtime](https://onnxruntime.ai/), through [onnxruntime_go](https://github.com/yalue/onnxruntime_go), runs the auto-tagger. The models in the bundled catalog are the work of [SmilingWolf](https://huggingface.co/SmilingWolf) (WD SwinV2 v3), [animetimm](https://huggingface.co/animetimm) (EVA02), [fancyfeast](https://huggingface.co/fancyfeast) (JoyTag), and [Camais03](https://huggingface.co/Camais03) (Camie Tagger v2).
-- [ffmpeg](https://ffmpeg.org/) decodes video for thumbnails and hover previews.
+- [ffmpeg](https://ffmpeg.org/) decodes video for thumbnails and hover previews; the bundled downloads carry a trimmed build of it from [ffmpeg-builds](https://github.com/monbooru/ffmpeg-builds), statically linked with [libwebp](https://chromium.googlesource.com/webm/libwebp) and [dav1d](https://code.videolan.org/videolan/dav1d).
 - monloader is mostly a wrapper for [gallery-dl](https://github.com/mikf/gallery-dl), which does the actual scraping. Reverse lookups by image similarity are answered by [IQDB](https://iqdb.org/) and [SauceNAO](https://saucenao.com/); md5 lookups by the boorus themselves. The PTR tag lookup syncs against the [Hydrus Public Tag Repository](https://hydrusnetwork.github.io/hydrus/PTR.html) (PTR) via [Hydrus Network](https://github.com/hydrusnetwork/hydrus)'s repository protocol; the tags, aliases, and implications it serves are the work of the hydrus community.
 - monsender's in-page image detection uses code from [ushiro](https://github.com/gary-host-laptop/ushiro) by gary-host-laptop and [behind!](https://github.com/kubuzetto/behind) by kubuzetto, originally under MPL-2.0.
 - The mondocs site is built with [Hugo](https://gohugo.io/).

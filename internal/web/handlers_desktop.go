@@ -117,11 +117,16 @@ func (s *Server) browseDirs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		full := filepath.Join(data.Path, e.Name())
-		// Stat rather than trusting the entry type so a symlinked folder
-		// still shows up as one.
-		fi, err := os.Stat(full)
-		if err != nil || !fi.IsDir() {
-			continue
+		// The dirent answers for a real directory on its own; only a
+		// symlink has to be resolved, so a folder with tens of thousands
+		// of entries does not pay a stat for each one to list 500.
+		if !e.IsDir() {
+			if e.Type()&fs.ModeSymlink == 0 {
+				continue
+			}
+			if fi, err := os.Stat(full); err != nil || !fi.IsDir() {
+				continue
+			}
 		}
 		data.Entries = append(data.Entries, browseEntry{Name: e.Name(), Path: full})
 	}
@@ -212,7 +217,7 @@ func (s *Server) desktopFolder(kind string) (string, bool) {
 	case "models":
 		return modelPath, true
 	case "gallery":
-		if cx := s.Active(); cx != nil {
+		if cx := s.active(); cx != nil {
 			return cx.GalleryPath, false
 		}
 	}
@@ -361,7 +366,7 @@ func (s *Server) settingsRestart(w http.ResponseWriter, r *http.Request) {
 		"Heading": s.booruName() + " is restarting",
 		"Hint":    "This page will reload automatically.",
 		"Poll":    true,
-	}, "restart", s.RequestRestart)
+	}, "restart", s.requestRestart)
 }
 
 // stopAfterRender answers with the message page, gets it onto the wire,
@@ -390,9 +395,9 @@ func (s *Server) RequestQuit() {
 	s.quitOnce.Do(func() { close(s.quit) })
 }
 
-// RequestRestart stops the process and asks the command to start it again,
+// requestRestart stops the process and asks the command to start it again,
 // for the settings that only take effect at boot.
-func (s *Server) RequestRestart() {
+func (s *Server) requestRestart() {
 	s.restart.Store(true)
 	s.RequestQuit()
 }

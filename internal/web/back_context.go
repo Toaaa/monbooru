@@ -51,9 +51,7 @@ func (b backContext) values(prefix string) url.Values {
 }
 
 // URLValues materialises the back-* fields (back_-prefixed keys).
-func (b backContext) URLValues() url.Values {
-	return b.values("back_")
-}
+func (b backContext) URLValues() url.Values { return b.values("back_") }
 
 // QueryString returns the encoded back_* fragment prefixed with sep
 // (use "?" for stand-alone hrefs, "&" for hrefs that already opened a

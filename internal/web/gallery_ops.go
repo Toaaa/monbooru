@@ -17,11 +17,11 @@ import (
 
 var errJobRunning = errors.New("a job is running; try again when it finishes")
 
-// SwitchGallery changes the runtime-active gallery. The change is ephemeral:
+// switchGallery changes the runtime-active gallery. The change is ephemeral:
 // the persisted default_gallery in monbooru.toml is only touched by
-// SetDefault. Every gallery runs its own watcher for the whole process
+// setDefault. Every gallery runs its own watcher for the whole process
 // lifetime, so the swap does not stop/start watchers or trigger a sync.
-func (s *Server) SwitchGallery(name string) error {
+func (s *Server) switchGallery(name string) error {
 	if s.jobs.IsRunning() {
 		return errJobRunning
 	}
@@ -45,9 +45,9 @@ func (s *Server) SwitchGallery(name string) error {
 	return nil
 }
 
-// SetDefault persists cfg.DefaultGallery so the given gallery loads on
+// setDefault persists cfg.DefaultGallery so the given gallery loads on
 // startup. Doesn't change the runtime-active gallery.
-func (s *Server) SetDefault(name string) error {
+func (s *Server) setDefault(name string) error {
 	s.ctxMu.Lock()
 	if _, ok := s.galleryState().contexts[name]; !ok {
 		s.ctxMu.Unlock()
@@ -71,9 +71,9 @@ func (s *Server) SetDefault(name string) error {
 	return nil
 }
 
-// AddGallery opens a new gallery and appends it to the config. DB and
+// addGallery opens a new gallery and appends it to the config. DB and
 // thumbnails directories are created under paths.data_path/<name>/.
-func (s *Server) AddGallery(name, galleryPath string) error {
+func (s *Server) addGallery(name, galleryPath string) error {
 	name = strings.TrimSpace(name)
 	galleryPath = strings.TrimSpace(galleryPath)
 	if err := config.ValidateGalleryName(name); err != nil {
@@ -131,10 +131,10 @@ func (s *Server) AddGallery(name, galleryPath string) error {
 	return nil
 }
 
-// RemoveGallery drops a gallery and deletes its DB + thumbnails on disk.
+// removeGallery drops a gallery and deletes its DB + thumbnails on disk.
 // When removeFolder is true, the gallery's source folder is also removed
 // (best-effort). Refuses to remove the active, default, or last gallery.
-func (s *Server) RemoveGallery(name string, removeFolder bool) error {
+func (s *Server) removeGallery(name string, removeFolder bool) error {
 	if s.jobs.IsRunning() {
 		return errJobRunning
 	}
@@ -194,9 +194,9 @@ func (s *Server) RemoveGallery(name string, removeFolder bool) error {
 	return nil
 }
 
-// RenameGallery moves the in-memory key and rewrites the TOML. The data
+// renameGallery moves the in-memory key and rewrites the TOML. The data
 // directory is also renamed so the derived paths stay consistent.
-func (s *Server) RenameGallery(oldName, newName string) error {
+func (s *Server) renameGallery(oldName, newName string) error {
 	oldName = strings.TrimSpace(oldName)
 	newName = strings.TrimSpace(newName)
 	if oldName == newName {
@@ -298,10 +298,10 @@ func (s *Server) RenameGallery(oldName, newName string) error {
 	return nil
 }
 
-// RepointGallery moves a gallery's source folder without touching its data.
+// repointGallery moves a gallery's source folder without touching its data.
 // The db and thumbnails stay where they are, so the whole operation is a
 // reopen: the context caches the path and the watcher holds it open.
-func (s *Server) RepointGallery(name, galleryPath string) error {
+func (s *Server) repointGallery(name, galleryPath string) error {
 	galleryPath = filepath.Clean(strings.TrimSpace(galleryPath))
 	if galleryPath == "" || !filepath.IsAbs(galleryPath) {
 		return fmt.Errorf("the gallery folder must be an absolute path")
@@ -389,14 +389,14 @@ func (s *Server) galleryRowsWithSnapshot(activeName string, activeImages, active
 			out[i].Tags = activeTags
 			continue
 		}
-		cx := s.Get(g.Name)
+		cx := s.get(g.Name)
 		if cx == nil || cx.DB == nil {
 			continue
 		}
-		if n, err := cx.VisibleCount(); err == nil {
+		if n, ok := cx.VisibleCount(); ok {
 			out[i].Images = n
 		}
-		if n, err := cx.TagCount(); err == nil {
+		if n, ok := cx.TagCount(); ok {
 			out[i].Tags = n
 		}
 	}
@@ -411,7 +411,7 @@ func (s *Server) gallerySwitchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
-	if err := s.SwitchGallery(name); err != nil {
+	if err := s.switchGallery(name); err != nil {
 		externalErr(w, r, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -432,8 +432,8 @@ func (s *Server) gallerySwitchHandler(w http.ResponseWriter, r *http.Request) {
 // never render; the page itself is the confirmation.
 //
 // The Add form accepts an optional file upload; when present the new gallery
-// is created first and then ImportGallery is called against it, so the user
-// can spin up a populated gallery in one step. ImportGallery refuses the
+// is created first and then importGallery is called against it, so the user
+// can spin up a populated gallery in one step. importGallery refuses the
 // active and default gallery as targets, but a freshly-added one is neither,
 // so the import is always permitted. On import failure the gallery stays in
 // place (empty) - the user can retry from its row or delete it.
@@ -448,7 +448,7 @@ func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	path := strings.TrimSpace(r.FormValue("gallery_path"))
-	if err := s.AddGallery(name, path); err != nil {
+	if err := s.addGallery(name, path); err != nil {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}
@@ -459,8 +459,8 @@ func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
 	file, fh, err := r.FormFile("import_file")
 	if err == http.ErrMissingFile {
 		// No import - switch to the new gallery so creating a gallery
-		// behaves like importing into one (which already calls SwitchGallery).
-		if switchErr := s.SwitchGallery(name); switchErr != nil {
+		// behaves like importing into one (which already calls switchGallery).
+		if switchErr := s.switchGallery(name); switchErr != nil {
 			logx.Infof("gallery %q: post-add switch skipped: %v", name, switchErr)
 		}
 		writeInlineFlash(w, "ok", "Gallery "+name+" added and now active.")
@@ -472,7 +472,7 @@ func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = file.Close() }()
 	if fh.Size == 0 {
-		if switchErr := s.SwitchGallery(name); switchErr != nil {
+		if switchErr := s.switchGallery(name); switchErr != nil {
 			logx.Infof("gallery %q: post-add switch skipped: %v", name, switchErr)
 		}
 		writeInlineFlash(w, "ok", "Gallery "+name+" added and now active.")
@@ -483,9 +483,9 @@ func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
 		writeInlineFlash(w, "err", "Gallery created. Import failed: file must be .db, .json, or .zip.")
 		return
 	}
-	// ImportGallery itself calls SwitchGallery on success, so the gallery
+	// importGallery itself calls switchGallery on success, so the gallery
 	// becomes active without an extra step here.
-	if err := s.ImportGallery(name, format, file); err != nil {
+	if err := s.importGallery(name, format, file); err != nil {
 		writeInlineFlash(w, "err", "Gallery created. Import failed: "+err.Error())
 		return
 	}
@@ -498,7 +498,7 @@ func (s *Server) settingsGalleryRenamePost(w http.ResponseWriter, r *http.Reques
 	}
 	oldName := r.PathValue("name")
 	newName := r.FormValue("new_name")
-	if err := s.RenameGallery(oldName, newName); err != nil {
+	if err := s.renameGallery(oldName, newName); err != nil {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}
@@ -516,7 +516,7 @@ func (s *Server) settingsGalleryDeletePost(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	removeFolder := r.FormValue("remove_folder") == "on"
-	if err := s.RemoveGallery(name, removeFolder); err != nil {
+	if err := s.removeGallery(name, removeFolder); err != nil {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}
@@ -525,7 +525,7 @@ func (s *Server) settingsGalleryDeletePost(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) settingsGalleryDefaultPost(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := s.SetDefault(name); err != nil {
+	if err := s.setDefault(name); err != nil {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}

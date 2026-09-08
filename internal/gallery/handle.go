@@ -1,3 +1,7 @@
+// Package gallery owns the files under a gallery root: ingest, thumbnails,
+// hashing, placement and the path containment every other package files
+// through. Paths on disk are native; the folder_path column they resolve to
+// is "/"-separated on every platform.
 package gallery
 
 import (

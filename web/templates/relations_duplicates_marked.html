@@ -42,7 +42,8 @@
                   data-group-id="{{.GroupID}}">[copy tags]</button>
           {{end}}
           <form hx-post="/relations/duplicates/marked/delete-one" hx-swap="none"
-                hx-confirm="Delete image {{.DuplicateID}} from the gallery? The file is removed from disk."
+                hx-confirm="Delete image {{.DuplicateID}} from the gallery?"
+                data-confirm-danger="Its file is removed from disk. This cannot be undone."
                 data-confirm-ok="Delete" style="display:inline">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="image_id" value="{{.DuplicateID}}">

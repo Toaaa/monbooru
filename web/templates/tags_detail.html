@@ -76,11 +76,6 @@
     <p class="field-hint">Searches for {{.Tag.Name}} and new adds of it land on the canonical. An alias row never carries images itself.</p>
   </section>
   {{else}}
-  <!-- Inbound (aliases, implied by) left, outbound (implies) right; the
-       facing rails meet mid-gap in the tag's category color so the two
-       relational blocks read as flowing through the tag. Below the
-       separator, stats sit left and the PTR panel with the recent strip
-       under it sit right. -->
   <div class="tag-detail-cols">
     <div>
       <div class="tag-detail-inbound" style="border-color:{{catColor .Tag.CategoryColor}}">
@@ -93,6 +88,7 @@
                     hx-delete="/tags/{{$.Tag.ID}}/aliases/group?origin={{urlQ .Origin}}&stale={{if .Stale}}1{{else}}0{{end}}"
                     hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'
                     hx-confirm="Delete all {{len .Tags}} {{if .Stale}}stale {{end}}aliases added by {{originLabel $kinds .Origin}}?"
+                    data-confirm-danger="Nothing records which spellings they mapped."
                     data-confirm-ok="Delete"
                     hx-on::after-request="if(event.detail.successful){pruneRelationGroup(this)}"
                     title="Delete every alias in this group">[×]</button>{{end}}</p>
@@ -132,6 +128,7 @@
                     hx-delete="/tags/{{$.Tag.ID}}/implied-by/group?origin={{urlQ .Origin}}&stale={{if .Stale}}1{{else}}0{{end}}"
                     hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'
                     hx-confirm="Remove all {{len .Implications}} {{if .Stale}}stale {{end}}implications added by {{originLabel $kinds .Origin}}?"
+                    data-confirm-danger="Nothing records which tags they implied."
                     data-confirm-ok="Remove"
                     hx-on::after-request="if(event.detail.successful){pruneRelationGroup(this)}"
                     title="Remove every implication in this group">[×]</button>{{end}}</p>
@@ -191,9 +188,6 @@
 
   <div class="tag-detail-cols">
     <div>
-      <!-- Applied-by and the histogram aggregate every row the tag
-           carries - seconds on a monster tag - so they arrive as one
-           lazy fragment after first paint. -->
       <section class="tag-detail-section"
                hx-get="/tags/{{.Tag.ID}}/usage" hx-trigger="load" hx-swap="innerHTML">Loading…</section>
     </div>
@@ -201,9 +195,8 @@
     <div>
       {{if and .MonloaderUsable (not .IsRating)}}
       <div id="ptr-contrib-panel" hx-get="/tags/{{.Tag.ID}}/ptr-contrib-panel" hx-trigger="load, implication-added from:body, tag-relations-changed from:body, ptr-contrib-closed from:body, monloader-status-changed from:body" hx-swap="innerHTML"></div>
-      {{/* The dialog mounts here, outside the panel, so a panel refetch never
-           destroys an open dialog with its ticks and typed reasons. */}}
       <div id="ptr-contrib-dialog-host"></div>
+      {{template "ptr_contrib_loading"}}
       {{end}}
       <section class="tag-detail-section">
         <h3>Recent images</h3>
@@ -223,11 +216,8 @@
   {{end}}
 </div>
 
-<!-- Rename dialog -->
 {{template "partials/tag_rename_dialog.html" (dict "CSRFToken" .CSRFToken "KeepAlias" (not .Tag.IsAlias))}}
 
-<!-- Change-category dialog: same PATCH as the listing's inline select,
-     collision merge offer included via the #tag-flash response. -->
 {{if not .IsRating}}
 <dialog id="detail-category-dialog">
   <form hx-patch="/tags/{{.Tag.ID}}/category"
@@ -239,22 +229,16 @@
     <div class="field">
       <label>Target category</label>
       <select name="category_id" id="detail-category-select">
-        {{range .Categories}}
+        {{range .Categories}}{{if ne .Name "rating"}}
         <option value="{{.ID}}" data-color="{{catColor .Color}}" {{if eq .ID $.Tag.CategoryID}}selected{{end}}>{{.Name}}</option>
-        {{end}}
+        {{end}}{{end}}
       </select>
     </div>
-    <div class="dialog-actions">
-      <button type="submit">Move</button>
-      <button type="button" onclick="document.getElementById('detail-category-dialog').close()">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "detail-category-dialog" "Submit" "Move"}}
   </form>
 </dialog>
 {{end}}
 
-<!-- Alias / repoint dialog: batch-alias with this tag as the whole
-     scope. A real form so Enter in the input submits like the
-     create-alias dialog. -->
 <dialog id="detail-alias-dialog">
   <form onsubmit="event.preventDefault(); confirmDetailAlias()">
     <p>{{if .Tag.IsAlias}}Repoint{{else}}Alias{{end}} <strong>{{.Tag.Name}}</strong> to:</p>

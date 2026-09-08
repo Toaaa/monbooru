@@ -1,7 +1,3 @@
-{{/* The tag page's look-up dialog: ask the PTR about a spelling of the
-     operator's choosing and preview what a pull under it would do to this
-     tag. Mounted in the same host as the contribute dialog; closing it
-     re-fetches the card the same way. */}}
 {{define "partials/tag_ptr_lookup_dialog.html"}}
 <dialog id="ptr-lookup-dialog" class="ptr-contrib-dialog" onclose="htmx.trigger(document.body,'ptr-contrib-closed')">
   <header class="ptr-contrib-dialog-head">
@@ -12,14 +8,9 @@
         hx-target="#ptr-lookup-result" hx-swap="innerHTML"
         onsubmit="disarmSuggest('ptr-lookup-as')">
     <div class="field">
-      {{/* The option rides above the input: the suggest dropdown overlays
-           whatever sits under the field, and a control the operator cannot
-           reach while typing is the one moment they want it. */}}
       <div class="ptr-lookup-head">
         <label for="ptr-lookup-as">spelling to look up (category:name, general when bare)</label>
         <label class="ptr-lookup-anywhere">
-          {{/* Focus goes back to the input so the widened search's answer is
-               not dropped as a swap landing on an unfocused field. */}}
           <input type="checkbox" id="ptr-lookup-anywhere" onchange="document.getElementById('ptr-lookup-as').focus()">
           match anywhere in the name <span class="field-hint">(slower)</span>
         </label>

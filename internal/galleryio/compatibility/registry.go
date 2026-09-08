@@ -76,9 +76,7 @@ var providers []Provider
 
 // Register adds p to the dispatch table. Called from each
 // per-application file's init().
-func Register(p Provider) {
-	providers = append(providers, p)
-}
+func Register(p Provider) { providers = append(providers, p) }
 
 // Detect returns the name of the matching provider, or "" when no
 // application's signal is present. Caller routes through Translate(...,

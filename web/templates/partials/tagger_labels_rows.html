@@ -1,6 +1,4 @@
 {{define "partials/tagger_labels_rows.html"}}
-{{/* Rules are written as they are applied, so the panel's count line
-     rides every result-list render instead of the dialog body. */}}
 <span id="tc-custom-count-{{.Name}}" hx-swap-oob="true">{{.CustomRules}}</span>
 {{if .Err}}
 <p class="field-hint">{{.Err}}</p>

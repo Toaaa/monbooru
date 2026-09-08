@@ -4,7 +4,11 @@
 {{else}}
 <div class="name-preview">
   {{with .Caption}}<span class="name-preview-cap">{{.}}</span>{{end}}
-  {{range .Rows}}<span class="name-preview-row"><span class="name-preview-from">{{.From}}</span> <span class="name-preview-arrow">-&gt;</span> <span class="name-preview-to">{{.To}}</span></span>{{end}}
+  {{with .Note}}<span class="name-preview-note">{{.}}</span>{{end}}
+  <dl class="name-preview-rows">
+    {{range .Rows}}<dt class="name-preview-from" title="{{.FromFull}}">{{.From}}</dt><dd class="name-preview-to">{{.To}}</dd>{{end}}
+  </dl>
+  {{if .More}}<button type="button" class="name-preview-more" data-rows="{{.NextRows}}" onclick="showMoreNamePreview(this)">show more</button>{{end}}
 </div>
 {{end}}
 {{end}}

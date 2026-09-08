@@ -1,5 +1,29 @@
-{{/* An archive says how many pages it holds, or just that it is one. Used
-     by every surface that renders a card: the grid and the related strip. */}}
+{{define "gallery_pagination_links"}}
+{{$seed := .RandomSeed}}
+{{$q := urlQ .Query}}
+  {{if and (gt .Page 1) (gt .TotalPages 2)}}
+    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page=1"
+       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page=1"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">« First</a>
+  {{end}}
+  {{if gt .Page 1}}
+    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{sub .Page 1}}"
+       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{sub .Page 1}}"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">← Prev</a>
+  {{end}}
+  <button type="button" class="page-jump current" data-current="{{.Page}}" data-total="{{.TotalPages}}" title="Go to page…">Page {{.Page}} / {{.TotalPages}}</button>
+  {{if lt .Page .TotalPages}}
+    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{add .Page 1}}"
+       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{add .Page 1}}"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">Next →</a>
+  {{end}}
+  {{if and (lt .Page .TotalPages) (gt .TotalPages 2)}}
+    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{.TotalPages}}"
+       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{.TotalPages}}"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">Last »</a>
+  {{end}}
+{{end}}
+
 {{define "manga_pill"}}{{if eq .FileType "cbz"}}{{if .PageCount}}<span class="manga-pill">{{deref .PageCount}} pages</span>{{else}}<span class="manga-pill">manga</span>{{end}}{{end}}{{end}}
 {{define "partials/thumbnail_grid.html"}}
 {{if .InboxUploadActive}}
@@ -32,14 +56,18 @@
   {{end}}
 </div>
 {{end}}
-<div class="thumb-grid{{if eq .ThumbnailFit "natural"}} fit-natural{{end}}">
+{{if gt .TotalPages 1}}
+<div class="pagination pagination-top">{{template "gallery_pagination_links" .}}</div>
+{{end}}
+<div class="thumb-grid{{if eq .ThumbnailFit "natural"}} fit-natural{{end}}{{if eq .ThumbSize "s"}} thumb-sm{{end}}{{if eq .ThumbSize "l"}} thumb-lg{{end}}">
   {{range $i, $_ := .Result.Results}}
   {{if $.InboxClusterAtIdx}}{{with index $.InboxClusterAtIdx $i}}
-  <div class="thumb-cluster-header" data-cluster-start="{{$i}}">
+  <div class="thumb-cluster-header" data-cluster-start="{{$i}}"{{if .Whole}} data-cluster-whole{{end}}>
     <span class="thumb-cluster-rule" aria-hidden="true"></span>
     <span class="thumb-cluster-label mono-small">{{.DateLabel}} · <a class="thumb-cluster-range" href="{{.RangeLink}}">{{.RangeLabel}}</a> · {{.Count}} on this page</span>
     <span class="thumb-cluster-rule" aria-hidden="true"></span>
     <button type="button" class="btn-sm thumb-cluster-select" data-cluster-unselect hidden>[Unselect]</button>
+    <button type="button" class="btn-sm thumb-cluster-select" data-cluster-all="{{.RangeQuery}}" title="The whole batch, including the part on other pages.">[Select all]</button>
     <button type="button" class="btn-sm thumb-cluster-select" data-cluster-select>[Select]</button>
   </div>
   {{end}}{{end}}
@@ -93,30 +121,6 @@
 </div>
 
 {{if gt .TotalPages 1}}
-{{$seed := .RandomSeed}}
-{{$q := urlQ .Query}}
-<div class="pagination">
-  {{if and (gt .Page 1) (gt .TotalPages 2)}}
-    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page=1"
-       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page=1"
-       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">« First</a>
-  {{end}}
-  {{if gt .Page 1}}
-    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{sub .Page 1}}"
-       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{sub .Page 1}}"
-       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">← Prev</a>
-  {{end}}
-  <button type="button" class="page-jump current" data-current="{{.Page}}" data-total="{{.TotalPages}}" title="Go to page…">Page {{.Page}} / {{.TotalPages}}</button>
-  {{if lt .Page .TotalPages}}
-    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{add .Page 1}}"
-       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{add .Page 1}}"
-       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">Next →</a>
-  {{end}}
-  {{if and (lt .Page .TotalPages) (gt .TotalPages 2)}}
-    <a href="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{.TotalPages}}"
-       hx-get="/?q={{$q}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{.TotalPages}}"
-       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">Last »</a>
-  {{end}}
-</div>
+<div class="pagination">{{template "gallery_pagination_links" .}}</div>
 {{end}}
 {{end}}

@@ -8,19 +8,19 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
-    REPO=$(cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]') && \
-    DOC=$(cat DOC.md 2>/dev/null | tr -d '[:space:]') && \
+RUN . ./packaging/release-env.sh && \
     CGO_ENABLED=1 go build -tags tagger \
-    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Package=docker' -X 'github.com/monbooru/monbooru/internal/web.Variant=cuda'" \
+    -ldflags="-s -w $LDFLAGS -X '$MOD.Package=docker' -X '$MOD.Variant=cuda'" \
     -o /monbooru ./cmd/monbooru
 
 # Stage 2: runtime -- NVIDIA CUDA 12.6 + cuDNN 9 runtime (x86_64 only).
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 
-# Drop the CUDA forward-compat libs (the host driver is used via the NVIDIA
-# container runtime) and the apt cache.
-RUN apt-get update && apt-get remove -y --purge 'cuda-compat-*' && \
+# Take the base's pending updates, drop the CUDA forward-compat libs
+# (the host driver is used via the NVIDIA container runtime) and the apt
+# cache.
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get remove -y --purge 'cuda-compat-*' && \
     rm -rf /usr/local/cuda/compat /var/lib/apt/lists/*
 
 # Single layer: install build-only fetch tools, pull the CUDA-enabled ORT and a
@@ -43,6 +43,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     echo "${FFMPEG_SHA256_LINUX64}  /tmp/ffmpeg.tar.xz" | sha256sum -c - && \
     mkdir -p /tmp/ff && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
     cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/ && \
+    mkdir -p /usr/share/doc/onnxruntime /usr/share/doc/ffmpeg && \
+    cp /tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}/LICENSE \
+       /tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}/ThirdPartyNotices.txt /usr/share/doc/onnxruntime/ && \
+    cp /tmp/ff/licenses/* /usr/share/doc/ffmpeg/ && \
     apt-get purge -y curl xz-utils && apt-get autoremove -y && \
     rm -rf /tmp/onnxruntime-* /tmp/ort.tgz /tmp/ff /tmp/ffmpeg.tar.xz /var/lib/apt/lists/*
 
@@ -54,6 +58,7 @@ RUN groupadd --gid 1000 monbooru && \
 USER 1000:1000
 
 ENV MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
+ENV MONBOORU_CONTAINER=1
 EXPOSE 8455
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

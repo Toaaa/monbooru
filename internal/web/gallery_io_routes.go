@@ -21,14 +21,14 @@ import (
 	"github.com/monbooru/monbooru/internal/models"
 )
 
-// ImportGallery replaces the target gallery's database (and optionally its
+// importGallery replaces the target gallery's database (and optionally its
 // source files) with the contents of the uploaded archive/file. Destructive;
 // the caller's UI is responsible for confirming intent.
 //
 // format is one of "db", "json", "zip". For "zip" the inner format is detected
 // from the archive. importOver is rejected when the target is the active or
-// default gallery (mirrors RemoveGallery's guard).
-func (s *Server) ImportGallery(name, format string, upload io.Reader) error {
+// default gallery (mirrors removeGallery's guard).
+func (s *Server) importGallery(name, format string, upload io.Reader) error {
 	newCx, err := s.replaceGalleryFromUpload(name, format, upload)
 	if err != nil {
 		return err
@@ -36,12 +36,12 @@ func (s *Server) ImportGallery(name, format string, upload io.Reader) error {
 	logx.Infof("gallery: imported %q (format=%s)", name, format)
 
 	// Make the imported gallery active before queuing the rebuild-thumbs job.
-	// Otherwise the job-manager lock the rebuild takes would keep SwitchGallery
+	// Otherwise the job-manager lock the rebuild takes would keep switchGallery
 	// blocked for the duration of the rebuild, leaving the user pinned to
 	// whatever gallery they had active at Import time. Failures here are
 	// non-fatal: the import already succeeded and a failed switch just leaves
 	// the previous gallery active.
-	if err := s.SwitchGallery(name); err != nil {
+	if err := s.switchGallery(name); err != nil {
 		logx.Infof("gallery %q: post-import switch skipped: %v", name, err)
 	}
 
@@ -145,7 +145,7 @@ func (s *Server) settingsGalleryExport(w http.ResponseWriter, r *http.Request) {
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	withImages := r.URL.Query().Get("with_images") == "true"
 
-	if s.Get(name) == nil {
+	if s.get(name) == nil {
 		http.Error(w, "unknown gallery", http.StatusNotFound)
 		return
 	}
@@ -163,15 +163,15 @@ func (s *Server) settingsGalleryExport(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch {
 	case format == "light" && withImages:
-		err = s.ExportGalleryLight(name, w)
+		err = s.exportGalleryLight(name, w)
 	case format == "light":
-		err = s.ExportGalleryLightManifest(name, w)
+		err = s.exportGalleryLightManifest(name, w)
 	case withImages:
-		err = s.ExportGalleryArchive(name, format, w)
+		err = s.exportGalleryArchive(name, format, w)
 	case format == "db":
-		err = s.ExportGalleryDB(name, w)
+		err = s.exportGalleryDB(name, w)
 	case format == "json":
-		err = s.ExportGalleryJSON(name, w)
+		err = s.exportGalleryJSON(name, w)
 	}
 	if err != nil {
 		logx.Warnf("gallery export %q: %v", name, err)
@@ -269,21 +269,21 @@ func (s *Server) settingsGalleryImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mode == "merge" {
-		res, err := s.MergeGallery(name, format, filePart)
+		res, err := s.mergeGallery(name, format, filePart)
 		if err != nil {
 			writeInlineFlash(w, "err", err.Error())
 			return
 		}
-		// Mirror the replace path (ImportGallery → SwitchGallery): a merge
+		// Mirror the replace path (importGallery → switchGallery): a merge
 		// brings new images into the target gallery, so the user expects to
 		// land on it. No-op if the target is already active.
-		if err := s.SwitchGallery(name); err != nil {
+		if err := s.switchGallery(name); err != nil {
 			logx.Infof("gallery %q: post-merge switch skipped: %v", name, err)
 		}
 		writeInlineFlash(w, "ok", "Gallery "+name+" merged: "+res.Summary()+".")
 		return
 	}
-	if err := s.ImportGallery(name, format, filePart); err != nil {
+	if err := s.importGallery(name, format, filePart); err != nil {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}
@@ -308,13 +308,13 @@ func (s *Server) batchTransfer(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.startScopedJob(w, r, "batch-transfer", models.JobTypeTransfer, func(ids []int64) {
+	s.startScopedJob(w, r, "batch-transfer", models.JobTypeTransfer, false, func(ids []int64) {
 		s.runBatchTransfer(ids, dstCx, removeAfter)
 	})
 }
 
 // transferImage copies the one image at {id} into the target gallery, mirroring
-// moveImage's single-image job shape so the watcher-suppression pattern is
+// placeImage's single-image job shape so the watcher-suppression pattern is
 // reused. Without remove_after the operator stays on the source image; with it
 // the source is gone, so the redirect returns to the gallery.
 func (s *Server) transferImage(w http.ResponseWriter, r *http.Request) {
@@ -329,7 +329,7 @@ func (s *Server) transferImage(w http.ResponseWriter, r *http.Request) {
 	if !s.startJob(w, models.JobTypeTransfer) {
 		return
 	}
-	srcCx := s.Active()
+	srcCx := s.active()
 	if err := s.transferOneImage(srcCx, dstCx, id, removeAfter); err != nil {
 		s.jobs.Fail(err.Error())
 		flashStatus(w, http.StatusBadRequest, err.Error())
@@ -368,7 +368,7 @@ func (s *Server) transferTarget(w http.ResponseWriter, r *http.Request) (*galler
 		msg = "The target must be a different gallery."
 	}
 	if msg == "" {
-		if dst := s.Get(target); dst == nil || dst.DB == nil {
+		if dst := s.get(target); dst == nil || dst.DB == nil {
 			msg = "Unknown target gallery."
 		} else if dst.Degraded {
 			msg = "The target gallery is unavailable."
@@ -381,10 +381,10 @@ func (s *Server) transferTarget(w http.ResponseWriter, r *http.Request) (*galler
 }
 
 // runBatchTransfer processes targets one image at a time with per-image error
-// isolation, mirroring runBatchMove: a single unreadable file can't strand the
+// isolation, mirroring runBatchPlace: a single unreadable file can't strand the
 // rest.
 func (s *Server) runBatchTransfer(ids []int64, dstCx *galleryCtx, removeAfter bool) {
-	srcCx := s.Active()
+	srcCx := s.active()
 	total := len(ids)
 	transferred, failed, cancelled := s.perImageLoop(ids, "transfer", "transferring", func(_ int, id int64) error {
 		return s.transferOneImage(srcCx, dstCx, id, removeAfter)
@@ -411,42 +411,47 @@ func (s *Server) runBatchTransfer(ids []int64, dstCx *galleryCtx, removeAfter bo
 // tests both have - and hand the resolved handle to internal/galleryio, which
 // never needs to know the server exists.
 
-func (s *Server) ExportGalleryDB(name string, w io.Writer) error {
+func (s *Server) exportGalleryDB(name string, w io.Writer) error {
 	return s.exportGallery(name, func(cx *galleryCtx) error { return galleryio.ExportGalleryDB(cx.Handle, w) })
 }
 
-func (s *Server) ExportGalleryJSON(name string, w io.Writer) error {
+func (s *Server) exportGalleryJSON(name string, w io.Writer) error {
 	return s.exportGallery(name, func(cx *galleryCtx) error { return galleryio.ExportGalleryJSON(cx.Handle, w) })
 }
 
-func (s *Server) ExportGalleryArchive(name, format string, w io.Writer) error {
+func (s *Server) exportGalleryArchive(name, format string, w io.Writer) error {
 	return s.exportGallery(name, func(cx *galleryCtx) error { return galleryio.ExportGalleryArchive(cx.Handle, format, w) })
 }
 
-func (s *Server) ExportGalleryLight(name string, w io.Writer) error {
+func (s *Server) exportGalleryLight(name string, w io.Writer) error {
 	return s.exportGallery(name, func(cx *galleryCtx) error { return galleryio.ExportGalleryLight(cx.Handle, w) })
 }
 
-func (s *Server) ExportGalleryLightManifest(name string, w io.Writer) error {
+func (s *Server) exportGalleryLightManifest(name string, w io.Writer) error {
 	return s.exportGallery(name, func(cx *galleryCtx) error { return galleryio.ExportGalleryLightManifest(cx.Handle, w) })
 }
 
 func (s *Server) exportGallery(name string, write func(*galleryCtx) error) error {
-	cx := s.Get(name)
+	cx := s.get(name)
 	if cx == nil {
 		return fmt.Errorf("unknown gallery %q", name)
 	}
 	return write(cx)
 }
 
-// MergeGallery additively brings the upload's tags - and its images, when it
-// carries their files - into the named gallery. Unlike ImportGallery it wipes
+// mergeGallery additively brings the upload's tags - and its images, when it
+// carries their files - into the named gallery. Unlike importGallery it wipes
 // nothing and is permitted on the active and default galleries.
-func (s *Server) MergeGallery(name, format string, upload io.Reader) (galleryio.MergeResult, error) {
-	if s.jobs.IsRunning() {
+func (s *Server) mergeGallery(name, format string, upload io.Reader) (galleryio.MergeResult, error) {
+	// Held, not merely checked: a merge is minutes of writes through one
+	// gallery's handle, and rename / repoint / remove would otherwise close
+	// and move that database halfway through.
+	if err := s.jobs.BeginSchedule(); err != nil {
 		return galleryio.MergeResult{}, errJobRunning
 	}
-	cx := s.Get(name)
+	defer s.jobs.EndSchedule()
+
+	cx := s.get(name)
 	if cx == nil {
 		return galleryio.MergeResult{}, fmt.Errorf("unknown gallery %q", name)
 	}

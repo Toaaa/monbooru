@@ -48,9 +48,9 @@ func relayRefused(w http.ResponseWriter, msg string) {
 }
 
 // pluginRelay carries one button click to its peer and flashes the answer.
-// The outbound call runs off the gallery read lock (see
-// contextMiddlewareBypass) so a slow peer cannot stall foreground requests
-// for the length of its timeout.
+// The outbound call runs off the gallery read lock (the route registers
+// gallery-free) so a slow peer cannot stall foreground requests for the
+// length of its timeout.
 func (s *Server) pluginRelay(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
@@ -91,8 +91,8 @@ func (s *Server) pluginRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The route bypasses ContextMiddleware so the peer call never runs under
-	// ctxMu; snapshot the active name instead.
+	// The route is gallery-free so the peer call never runs under ctxMu;
+	// snapshot the active name instead.
 	galleryName := s.activeGallery()
 
 	answer, err := s.callPluginRelay(r.Context(), p.Name, base+button.Path, p.PeerToken, pluginRelayRequest{
@@ -104,7 +104,7 @@ func (s *Server) pluginRelay(w http.ResponseWriter, r *http.Request) {
 		ImageIDs: ids,
 	})
 	if err != nil {
-		s.markPluginDown(name)
+		s.peers.MarkDown(name)
 		logx.Warnf("plugin relay %s: %v", name, err)
 		relayRefused(w, "plugin "+name+" did not answer")
 		return

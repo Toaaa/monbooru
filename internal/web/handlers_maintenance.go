@@ -40,7 +40,7 @@ func (s *Server) pruneMissingImagesPost(w http.ResponseWriter, r *http.Request) 
 	}
 	thumbnailsPath := s.thumbnailsPath()
 	tagSvc := s.tagSvc()
-	active := s.Active()
+	active := s.active()
 	onDelete := s.onImagesDeleteCallback()
 	go func() {
 		ctx := s.jobs.Context()
@@ -95,7 +95,7 @@ func (s *Server) pruneMissingImagesPost(w http.ResponseWriter, r *http.Request) 
 // long maintenance buttons. The body is shared with scheduledRemoveOrphans
 // via runOrphanSweep.
 func (s *Server) pruneOrphanedThumbnailsPost(w http.ResponseWriter, r *http.Request) {
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		writeInlineFlash(w, "err", "No active gallery.")
 		return
@@ -119,9 +119,62 @@ func (s *Server) pruneOrphanedThumbnailsPost(w http.ResponseWriter, r *http.Requ
 	writeInlineFlash(w, "ok", "Thumbnail prune started.")
 }
 
+// emptyFolderListCap bounds the review list; past it the operator removes
+// what is listed and scans again.
+const emptyFolderListCap = 2000
+
+// emptyFoldersScanPost lists the folders under the gallery root holding
+// nothing, for the operator to pick from. Read-only, so unlike the removal
+// beside it this takes no job slot.
+func (s *Server) emptyFoldersScanPost(w http.ResponseWriter, r *http.Request) {
+	cx := s.active()
+	if cx == nil || cx.Degraded {
+		writeInlineFlash(w, "err", "Gallery path is unreadable.")
+		return
+	}
+	dirs, err := gallery.ScanEmptyDirs(cx.GalleryPath)
+	if err != nil {
+		writeInlineFlash(w, "err", "Error: "+err.Error())
+		return
+	}
+	if len(dirs) == 0 {
+		writeInlineFlash(w, "ok", "No empty folders.")
+		return
+	}
+	s.renderTemplate(w, "partials/empty_folders.html", map[string]any{
+		"Dirs":      dirs[:min(len(dirs), emptyFolderListCap)],
+		"Withheld":  max(len(dirs)-emptyFolderListCap, 0),
+		"CSRFToken": s.csrfToken(sessionFromContext(r.Context())),
+	})
+}
+
+// emptyFoldersRemovePost unlinks the folders left checked in the scan
+// result. Short enough to answer in the request, but it holds a job slot so
+// a concurrent move cannot lose the folder it just created.
+func (s *Server) emptyFoldersRemovePost(w http.ResponseWriter, r *http.Request) {
+	if !parseFormOK(w, r) {
+		return
+	}
+	paths := r.Form["folder"]
+	if len(paths) == 0 {
+		writeInlineFlash(w, "err", "No folders selected.")
+		return
+	}
+	if !s.startJob(w, models.JobTypePruneDirs) {
+		return
+	}
+	removed := gallery.RemoveEmptyDirs(s.galleryPath(), paths)
+	s.jobs.Complete(fmt.Sprintf("Removed %d empty folder(s).", removed))
+	kept := ""
+	if n := len(paths) - removed; n > 0 {
+		kept = fmt.Sprintf(", %d no longer empty", n)
+	}
+	writeInlineFlash(w, "ok", fmt.Sprintf("Removed %d empty folder(s)%s.", removed, kept))
+}
+
 func (s *Server) recalcTagsPost(w http.ResponseWriter, r *http.Request) {
 	updated, err := s.tagSvc().RecalcCount()
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	if err != nil {
 		writeInlineFlash(w, "err", fmt.Sprintf("Recalc partially completed (%d updated): %s", updated, err.Error()))
 		return
@@ -197,7 +250,7 @@ func (s *Server) duplicatesListHandler(w http.ResponseWriter, r *http.Request) {
 	// sha256 walker and the delete-all branch apply - otherwise a SFW
 	// ceiling still prints the paths of what it hides, and [promote]
 	// acts on them.
-	from, args := duplicatePathsFrom(r, s.Active())
+	from, args := duplicatePathsFrom(r, s.active())
 	var total int
 	if err := s.db().Read.QueryRow(`SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -257,7 +310,7 @@ func (s *Server) removeDuplicatesPost(w http.ResponseWriter, r *http.Request) {
 			FROM image_paths ip
 			JOIN images i ON i.id = ip.image_id
 			WHERE ip.is_canonical = 0`
-		if where, wargs := resolveCeiling(r, s.Active()).WhereOne("i.id"); where != "" {
+		if where, wargs := resolveCeiling(r, s.active()).WhereOne("i.id"); where != "" {
 			query += ` AND ` + where
 			args = append(args, wargs...)
 		}
@@ -322,9 +375,8 @@ func (s *Server) removeDuplicatesPost(w http.ResponseWriter, r *http.Request) {
 		}
 		// Batch DELETEs by chunk in one transaction each so the writer
 		// pool sees one Exec per 500 rows instead of one per row.
-		_, cancelled, err := chunkedJob(ctx, s.jobs, pathIDs, chunkSize, "removing", func(chunk []int64) error {
-			ph, args := db.InPlaceholders(chunk)
-			if _, err := s.db().Write.Exec(`DELETE FROM image_paths WHERE id IN (`+ph+`)`, args...); err != nil {
+		_, cancelled, err := jobs.Chunked(ctx, s.jobs, pathIDs, chunkSize, "removing", func(chunk []int64) error {
+			if err := gallery.DeleteAliasPaths(s.db(), chunk); err != nil {
 				logx.Warnf("remove duplicates chunk delete: %v", err)
 				return err
 			}
@@ -378,16 +430,16 @@ func (s *Server) promoteAliasPathPost(w http.ResponseWriter, r *http.Request) {
 		flashStatus(w, http.StatusBadRequest, "Cannot promote: file is missing on disk.")
 		return
 	}
-	if err := s.promoteCanonicalPath(imageID, newPath,
-		`UPDATE image_paths SET is_canonical = 1 WHERE id = ?`, pathID); err != nil {
+	if err := gallery.PromoteCanonicalByPathID(s.db(), s.galleryPath(), imageID, pathID, newPath); err != nil {
 		flashStatus(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.active().InvalidateCaches()
 	writeInlineFlash(w, "ok", "Promoted to canonical.")
 }
 
 func (s *Server) rebuildThumbnailsPost(w http.ResponseWriter, r *http.Request) {
-	if err := s.startRebuildThumbsJob(s.Active()); err != nil {
+	if err := s.startRebuildThumbsJob(s.active()); err != nil {
 		if errors.Is(err, jobs.ErrJobRunning) {
 			flashStatus(w, http.StatusConflict, "A job is already running.")
 			return
@@ -482,7 +534,7 @@ func (s *Server) computeHashesPost(w http.ResponseWriter, r *http.Request) {
 	}
 	database := s.db()
 	thumbnailsPath := s.thumbnailsPath()
-	active := s.Active()
+	active := s.active()
 	tree := active.bkTree
 	go func() {
 		ctx := s.jobs.Context()
@@ -659,7 +711,7 @@ func (s *Server) reExtractMetadataPost(w http.ResponseWriter, r *http.Request) {
 
 	database := s.db()
 	thumbnailsPath := s.thumbnailsPath()
-	active := s.Active()
+	active := s.active()
 	go func() {
 		ctx := s.jobs.Context()
 		processed := 0

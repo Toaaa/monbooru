@@ -32,7 +32,8 @@
 
   <content_rating type="oars-1.1"/>
 
+  <!-- Filled at build time from VERSION.md and the newest CHANGELOG.md heading. -->
   <releases>
-    <release version="1.19.1" date="2026-08-24"/>
+    <!--RELEASE-->
   </releases>
 </component>

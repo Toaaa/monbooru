@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -27,8 +28,10 @@ import (
 // search.Execute may spend before the handler skips the second
 // no-ceiling COUNT that drives the "N hidden" indicator. The render
 // degrades to the existing matches-only line instead of paying a
-// second slow pass when the first already ate the search budget.
-const galleryHiddenIndicatorBudget = 300 * time.Millisecond
+// second slow pass when the first already ate the search budget. A var
+// so a test asserting the indicator can pin the branch instead of the
+// machine's speed.
+var galleryHiddenIndicatorBudget = 300 * time.Millisecond
 
 // batchGapMinutes is the inter-file inactivity threshold that closes
 // one inbox cluster and opens the next. Hardcoded for v1 - retune by
@@ -41,13 +44,19 @@ type galleryData struct {
 	// SearchWarning flags a closed-vocabulary filter value that matched
 	// nothing because the value itself is unrecognised (type:video), so the
 	// empty result doesn't read as "no images" when it means "bad value".
-	SearchWarning     string
-	Sort              string
-	Order             string
-	ThumbnailFit      string // "square" | "natural"; drives the grid's thumb-fit CSS class
-	RandomSeed        int64
-	Page              int
-	TotalPages        int
+	SearchWarning   string
+	Sort            string
+	Order           string
+	ThumbnailFit    string // "square" | "natural"; drives the grid's thumb-fit CSS class
+	ThumbSize       string // "s" | "m" | "l"; the grid's cell-size step
+	RandomSeed      int64
+	Page            int
+	TotalPages      int
+	PageSize        int              // size in force for this request; the Show ramp's value
+	PageSizeChoices []PageSizeChoice // the Show ramp's buttons, leading with the configured default
+	// StatusOOB marks the shared status-bar partial as an out-of-band swap,
+	// which the HTMX fragment needs and the full-page render must not carry.
+	StatusOOB         bool
 	Result            *models.SearchResult
 	SidebarTags       []models.Tag
 	FolderTree        []gallery.FolderNode
@@ -94,10 +103,17 @@ type inboxCluster struct {
 	DateLabel  string // "2026-05-22"
 	RangeLabel string // "14:32 -> 14:36" (or just "14:32" for a singleton)
 	// RangeLink resolves to a /?q=... URL that the cluster header's
-	// date range doubles as so a cluster whose tail spans into the
-	// next page can still be acted on as a whole via the batch bar's
-	// scope=search path.
+	// date range doubles as, so the batch is one click away as a search
+	// of its own.
 	RangeLink string
+	// RangeQuery is that link's query alone, which [Select all] hands to
+	// /internal/search/ids to take the whole batch - tail on the next page
+	// included - without moving off the listing on screen.
+	RangeQuery string
+	// Whole says the batch is entirely on this page, so the boxes on screen
+	// are the whole of it: what [Select all] would add is already visible,
+	// and the button can go once every one of them is picked.
+	Whole bool
 }
 
 func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
@@ -185,10 +201,10 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ceiling := resolveCeiling(r, s.Active())
+	ceiling := resolveCeiling(r, s.active())
 	pinnedCollection := search.PinnedCollectionName(expr)
 	expr = ceiling.Apply(expr)
-	pageSize := s.pageSize()
+	pageSize := s.pageSize(r)
 	sq := search.Query{
 		Expr:       expr,
 		Sort:       sortStr,
@@ -206,8 +222,8 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 	// counts every visible image, so it overcounts when a ceiling is on -
 	// fall back to fastCountCeiling in that case.
 	if expr == nil {
-		if cx := s.Active(); cx != nil {
-			if n, err := cx.VisibleCount(); err == nil {
+		if cx := s.active(); cx != nil {
+			if n, ok := cx.VisibleCount(); ok {
 				sq.PresetTotal = &n
 			}
 		}
@@ -275,8 +291,8 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		bareExpr, _ := search.Parse(queryStr)
 		switch {
 		case bareExpr == nil:
-			if cx := s.Active(); cx != nil {
-				if n, err := cx.VisibleCount(); err == nil {
+			if cx := s.active(); cx != nil {
+				if n, ok := cx.VisibleCount(); ok {
 					rawTotal = n
 				}
 			}
@@ -323,9 +339,12 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		Sort:              sortStr,
 		Order:             orderStr,
 		ThumbnailFit:      s.thumbnailFit(),
+		ThumbSize:         thumbSize(r),
 		RandomSeed:        randomSeed,
 		Page:              page,
 		TotalPages:        totalPages,
+		PageSize:          pageSize,
+		PageSizeChoices:   s.pageSizeChoices(r),
 		Result:            result,
 		SidebarTags:       sb.Tags,
 		FolderTree:        sb.Folders,
@@ -347,7 +366,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		data.SimilarityPercent = scores
 	}
 	if inboxClustersActive(sortStr, orderStr, expr) {
-		data.InboxClusterAtIdx = computeInboxClusters(result.Results, queryStr)
+		data.InboxClusterAtIdx = computeInboxClusters(result.Results, queryStr, page > 1, page < totalPages)
 	}
 	if inboxFilterActive(expr) {
 		data.InboxUploadActive = true
@@ -362,13 +381,14 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		// The header is outside the swap target, so the sort select rides
 		// the fragment as an out-of-band swap.
 		data.SortSelectOOB = true
+		data.StatusOOB = true
 		s.renderTemplate(w, "partials/gallery_htmx.html", data)
 		return
 	}
 	// The batch-strip dialog's source select rides SourceLabelCounts even on
 	// the full-page render, where the sidebar (and its labels) is lazy-loaded;
 	// fill it from the cheap cached, ceiling-blind count.
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		data.SourceLabelCounts, _ = cx.SourceLabelCounts()
 	}
 	s.renderTemplate(w, "gallery.html", data)
@@ -428,7 +448,7 @@ func (s *Server) sidebarLoad(pageImageIDs []int64, ceiling *Ceiling) sidebarBund
 		defer wg.Done()
 		sb.Saved = s.loadSavedSearches("sidebar")
 	}()
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		sb.Folders, _ = cx.FolderTreeUnder(ceiling)
 		sb.SourceLabels, _ = cx.SourceLabelCountsUnder(ceiling)
 	}
@@ -443,7 +463,7 @@ func (s *Server) sidebarLoad(pageImageIDs []int64, ceiling *Ceiling) sidebarBund
 func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	queryStr := q.Get("q")
-	ceiling := resolveCeiling(r, s.Active())
+	ceiling := resolveCeiling(r, s.active())
 
 	// galleryHandler piggy-backs the page's image IDs on the lazy-load URL
 	// so we don't re-run search.Execute just to enumerate them. A direct
@@ -482,7 +502,7 @@ func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 			Order:      orderStr,
 			RandomSeed: randomSeed,
 			Page:       page,
-			Limit:      s.pageSize(),
+			Limit:      s.pageSize(r),
 			SkipCount:  true,
 		}
 		result, err := search.Execute(s.db(), sq)
@@ -516,7 +536,7 @@ func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 // the folder-tree aggregation cost on first paint.
 func (s *Server) sidebarBrowse(w http.ResponseWriter, r *http.Request) {
 	queryStr := r.URL.Query().Get("q")
-	ceiling := resolveCeiling(r, s.Active())
+	ceiling := resolveCeiling(r, s.active())
 
 	var (
 		folders      []gallery.FolderNode
@@ -532,7 +552,7 @@ func (s *Server) sidebarBrowse(w http.ResponseWriter, r *http.Request) {
 		defer wg.Done()
 		saved = s.loadSavedSearches("sidebar-browse")
 	}()
-	if cx := s.Active(); cx != nil {
+	if cx := s.active(); cx != nil {
 		folders, _ = cx.FolderTreeUnder(ceiling)
 		sourceLabels, _ = cx.SourceLabelCountsUnder(ceiling)
 	}
@@ -554,6 +574,40 @@ func (s *Server) sidebarBrowse(w http.ResponseWriter, r *http.Request) {
 // gallerySidebar can skip re-running search.Execute. The param is always
 // set (even when empty) because absence is the signal for a direct URL hit
 // that must fall back to the search call.
+// PageSizeChoice is one button of the Show ramp. Title is the hover text,
+// set only where the label alone doesn't say what the button does.
+type PageSizeChoice struct {
+	Value    string
+	Label    string
+	Title    string
+	Selected bool
+}
+
+// pageSizeChoices leads with the configured default, which is what makes the
+// per-browser override two-way: without a button that clears the cookie, the
+// first click leaves the Settings field describing nobody's browser and any
+// size outside the offered set unreachable. That button names the size it
+// hands back on hover, since the ramp has no room to spell it out.
+func (s *Server) pageSizeChoices(r *http.Request) []PageSizeChoice {
+	s.cfgMu.RLock()
+	configured := s.cfg.UI.PageSize
+	s.cfgMu.RUnlock()
+
+	override := pageSizeOverride(r)
+	out := make([]PageSizeChoice, 0, len(PageSizeOptions)+1)
+	out = append(out, PageSizeChoice{
+		Value:    "default",
+		Label:    "Def",
+		Title:    fmt.Sprintf("Default (%d)", configured),
+		Selected: override == 0,
+	})
+	for _, n := range PageSizeOptions {
+		label := strconv.Itoa(n)
+		out = append(out, PageSizeChoice{Value: label, Label: label, Selected: override == n})
+	}
+	return out
+}
+
 func buildSidebarURL(q, sort, order, page, seed string, ids []int64) string {
 	v := url.Values{}
 	if q != "" {
@@ -697,8 +751,10 @@ func inboxClustersActive(sort, order string, expr search.Expr) bool {
 // rows that don't emit a header. queryStr is the operator's current
 // search; the cluster header's date-range link extends it with a
 // date:T1..T2 leaf so the batch bar's scope=search path can act on the
-// whole cluster even when the tail crosses a page boundary.
-func computeInboxClusters(images []models.Image, queryStr string) []*inboxCluster {
+// whole cluster even when the tail crosses a page boundary. moreAbove /
+// moreBelow say the listing continues past this page, which is the only
+// way a cluster can have rows the page does not hold.
+func computeInboxClusters(images []models.Image, queryStr string, moreAbove, moreBelow bool) []*inboxCluster {
 	if len(images) == 0 {
 		return nil
 	}
@@ -725,7 +781,8 @@ func computeInboxClusters(images []models.Image, queryStr string) []*inboxCluste
 			}
 		}
 		if closeCluster {
-			markers[start] = buildInboxCluster(images[start:i], queryStr)
+			spills := (start == 0 && moreAbove) || (i == len(images) && moreBelow)
+			markers[start] = buildInboxCluster(images[start:i], queryStr, !spills)
 			start = i
 		}
 	}
@@ -735,11 +792,9 @@ func computeInboxClusters(images []models.Image, queryStr string) []*inboxCluste
 // sameBatch reports whether two rows carry the same non-nil upload-batch
 // token. Two nil tokens are not the same batch - those rows fall back to
 // the time-gap rule.
-func sameBatch(a, b *int64) bool {
-	return a != nil && b != nil && *a == *b
-}
+func sameBatch(a, b *int64) bool { return a != nil && b != nil && *a == *b }
 
-func buildInboxCluster(rows []models.Image, queryStr string) *inboxCluster {
+func buildInboxCluster(rows []models.Image, queryStr string, whole bool) *inboxCluster {
 	// rows[0] is the newest entry (DESC), rows[len-1] the oldest.
 	// Header labels and the date: bounds both read in the operator's
 	// local zone - the date filter interprets its values there too.
@@ -751,15 +806,19 @@ func buildInboxCluster(rows []models.Image, queryStr string) *inboxCluster {
 	if len(rows) > 1 && !oldest.Equal(newest) {
 		rangeLabel = oldest.Format("15:04") + " -> " + newest.Format("15:04")
 	}
-	// Minute-precise bounds so a cluster spanning 19:23 -> 19:30 lands
-	// on exactly the rows whose ingest minute falls in that window;
-	// day-precise bounds would widen the link to the whole day.
-	clusterQ := "inbox:true date:" + oldest.Format("2006-01-02T15:04") + ".." + newest.Format("2006-01-02T15:04")
+	// A web upload's rows all carry its token, which is the only thing that
+	// names one batch: minute-precise bounds still take every batch that
+	// landed in the same minute. Watcher and sync rows have no token, so
+	// they fall back to the window they were clustered by.
+	leaf := " date:" + oldest.Format("2006-01-02T15:04") + ".." + newest.Format("2006-01-02T15:04")
+	if rows[0].UploadBatch != nil {
+		leaf = " batch:" + strconv.FormatInt(*rows[0].UploadBatch, 10)
+	}
+	clusterQ := "inbox:true" + leaf
 	if queryStr != "" && queryStr != "inbox:true" {
 		// Preserve any extra leaves the operator added while still
-		// scoping to the cluster's date range; the search merges as
-		// an implicit AND.
-		clusterQ = queryStr + " date:" + oldest.Format("2006-01-02T15:04") + ".." + newest.Format("2006-01-02T15:04")
+		// scoping to the cluster; the search merges as an implicit AND.
+		clusterQ = queryStr + leaf
 	}
 	// RangeLink omits sort/order so the receiving gallery handler falls
 	// through to its defaults (newest, desc). The cluster gate
@@ -770,5 +829,7 @@ func buildInboxCluster(rows []models.Image, queryStr string) *inboxCluster {
 		DateLabel:  dateLabel,
 		RangeLabel: rangeLabel,
 		RangeLink:  "/?" + url.Values{"q": []string{clusterQ}}.Encode(),
+		RangeQuery: clusterQ,
+		Whole:      whole,
 	}
 }

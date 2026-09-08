@@ -476,7 +476,7 @@ func (s *Server) resolveCanonicalTagInput(input string, create bool) (int64, str
 		if !create {
 			return 0, "Tag not found: " + input
 		}
-		cx := s.Active()
+		cx := s.active()
 		if cx == nil || cx.GeneralCategoryID == 0 {
 			return 0, "Could not resolve the general category."
 		}
@@ -506,7 +506,7 @@ func (s *Server) createTagPost(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	hxDone(w, r, "Tag "+name+" created.", "/tags?q="+url.QueryEscape(name), "/tags")
 }
 
@@ -533,7 +533,7 @@ func (s *Server) createAliasPost(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 
 	hxDone(w, r, "Alias "+name+" created.", "/tags?type=alias&q="+url.QueryEscape(name), "/tags?type=alias")
 }
@@ -567,7 +567,7 @@ func (s *Server) addTagAliasPost(w http.ResponseWriter, r *http.Request) {
 		added++
 	}
 	if added > 0 {
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 	}
 	switch {
 	case len(failures) == 0:
@@ -613,7 +613,7 @@ func (s *Server) removeTagAliasesDelete(w http.ResponseWriter, r *http.Request) 
 		removed++
 	}
 	if removed > 0 {
-		s.Active().InvalidateCaches()
+		s.active().InvalidateCaches()
 	}
 	noun := "alias"
 	if removed != 1 {
@@ -634,7 +634,7 @@ func (s *Server) deleteTagHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	// A deleted alias row changes its canonical's relation diff; the tag
 	// detail PTR panel re-fetches on this. An alias delete also confirms
 	// with a flash, matching the implication remove.
@@ -670,7 +670,7 @@ func (s *Server) runDeleteTagsByIDs(ids []int64) {
 		return true, nil
 	})
 
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	summary := skippedSuffix(fmt.Sprintf("deleted %d tag(s)", deleted), skipped)
 	s.finishTagScopeJob(deleted, reasons, cancelled, "delete tags", summary)
 }
@@ -680,9 +680,8 @@ func (s *Server) renameTagPost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	newName := strings.TrimSpace(r.FormValue("name"))
-	if newName == "" {
-		externalErr(w, r, "Name required.", http.StatusBadRequest)
+	newName, ok := requiredFormExternal(w, r, "name", "Name required.")
+	if !ok {
 		return
 	}
 	var err error
@@ -697,7 +696,7 @@ func (s *Server) renameTagPost(w http.ResponseWriter, r *http.Request) {
 	}
 	// A tag rename moves it to a new literal-name match in the search
 	// resolver, so a cached `?q=oldname` snapshot must drop too.
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	// Refresh the current URL instead of redirecting to /tags so the
 	// user's active filter - q, sort, origin, page - survives the
 	// rename and the renamed row stays in scope.

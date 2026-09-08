@@ -81,7 +81,7 @@ func (s *Server) runPTRMergeSweep(id int64, spelling string) {
 		s.jobs.Fail(err.Error())
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	s.runPTRTagSweep([]int64{target}, "")
 }
 
@@ -98,7 +98,7 @@ func (s *Server) ptrSpellingForm(input string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if catID == s.Active().GeneralCategoryID {
+	if catID == s.active().GeneralCategoryID {
 		return norm, true
 	}
 	return input[:len(input)-len(bare)] + norm, true
@@ -385,7 +385,7 @@ func (s *Server) runPTRTagSweep(ids []int64, as string) {
 			logx.Warnf("ptr lookup recalc: %v", err)
 		}
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 
 	msg := fmt.Sprintf("PTR: added %d alias(es) and %d implication(s) across %d tag(s)", aliases, implications, processed)
 	if lookedUpAs != "" {
@@ -595,7 +595,7 @@ func (s *Server) splitCategoryTag(input string) (catID int64, bare string, ok bo
 			}
 		}
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil || cx.GeneralCategoryID == 0 {
 		return 0, "", false
 	}

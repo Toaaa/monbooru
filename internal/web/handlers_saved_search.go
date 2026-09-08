@@ -17,7 +17,7 @@ func (s *Server) deleteSavedSearch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	// 200 + empty body - HTMX outerHTML swap removes the element.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -54,7 +54,7 @@ func (s *Server) createSavedSearch(w http.ResponseWriter, r *http.Request) {
 		externalErr(w, r, msg, http.StatusBadRequest)
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	if isHTMXRequest(r) {
 		writeInlineFlash(w, "ok", "Saved.")
 		return

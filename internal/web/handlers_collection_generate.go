@@ -28,14 +28,17 @@ func (s *Server) generateMangaCollection(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.goGenerationJob(func(ctx context.Context) (string, error) {
-		done, err := s.runMangaCollection(ctx, cx, img, name, writeDir, naming)
-		return fmt.Sprintf("Generated %d page(s) into collection %q.", done, name), err
+		done, created, err := s.runMangaCollection(ctx, cx, img, name, writeDir, naming)
+		if created == 0 {
+			return fmt.Sprintf("These %d page(s) are already in collection %q; nothing new was created.", done, name), err
+		}
+		return fmt.Sprintf("Generated %d page(s) into collection %q.", created, name), err
 	})
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // collectionJobPrologue validates a generation request's label, claims the
-// job lane, and snapshots what the job runs against. SwitchGallery refuses
+// job lane, and snapshots what the job runs against. switchGallery refuses
 // swaps while a job runs, so the snapshot stays valid for its lifetime.
 func (s *Server) collectionJobPrologue(w http.ResponseWriter, r *http.Request) (name string, cx *galleryCtx, writeDir string, naming gallery.Naming, ok bool) {
 	if !parseFormOK(w, r) {
@@ -50,14 +53,14 @@ func (s *Server) collectionJobPrologue(w http.ResponseWriter, r *http.Request) (
 		flashStatus(w, http.StatusBadRequest, "Collection label too long.")
 		return "", nil, "", naming, false
 	}
-	if active := s.Active(); active == nil || active.Degraded {
+	if active := s.active(); active == nil || active.Degraded {
 		flashStatus(w, http.StatusServiceUnavailable, "Generation unavailable: gallery path is unreadable.")
 		return "", nil, "", naming, false
 	}
 	if !s.startJob(w, models.JobTypeTag) {
 		return "", nil, "", naming, false
 	}
-	cx = s.Active()
+	cx = s.active()
 	writeDir, naming = s.receivedNaming(cx.Name)
 	return name, cx, writeDir, naming, true
 }
@@ -80,13 +83,15 @@ func (s *Server) goGenerationJob(run func(ctx context.Context) (string, error)) 
 	}()
 }
 
-// runMangaCollection extracts every page of img into cx's gallery,
-// filing each under the collection label, and returns the page count. A
-// page that fails to extract aborts the job.
-func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *models.Image, name, writeDir string, naming gallery.Naming) (int, error) {
+// runMangaCollection extracts every page of img into cx's gallery, filing
+// each under the collection label. Returns the pages walked and how many of
+// them landed as new rows - a page whose bytes the gallery already holds
+// folds onto the existing row, so a re-run creates nothing. A page that
+// fails to extract aborts the job.
+func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *models.Image, name, writeDir string, naming gallery.Naming) (int, int, error) {
 	destDir, err := gallery.ResolveSubdir(cx.GalleryPath, writeDir)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	stem := strings.TrimSuffix(filepath.Base(img.CanonicalPath), filepath.Ext(img.CanonicalPath))
 	// Each archive unpacks into its own {stem}-{hash} folder so a long
@@ -97,7 +102,7 @@ func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *mo
 	}
 	destDir = filepath.Join(destDir, sub)
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	// Every page can fold onto a row the gallery already holds (generating
 	// a collection out of the cbz those same images were packed into), in
@@ -107,41 +112,44 @@ func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *mo
 	defer func() { _ = os.Remove(destDir) }()
 	total := *img.PageCount
 	s.jobs.Update(0, total, "generating…")
-	done := 0
+	done, created := 0, 0
 	filedDir := ""
 	for n := 1; n <= total; n++ {
 		if ctx.Err() != nil {
-			return done, ctx.Err()
+			return done, created, ctx.Err()
 		}
 		pageID, filed, err := s.extractMangaPageToGallery(cx, img, n, destDir, "p")
 		if err != nil {
-			return done, fmt.Errorf("page %d/%d: %w", n, total, err)
+			return done, created, fmt.Errorf("page %d/%d: %w", n, total, err)
 		}
-		// The destination is resolved once, off the first page: the pages of
-		// one archive belong in one folder, and a template carrying {id} or
-		// a clock would scatter them otherwise.
-		if filed && naming.Folder != nil {
-			if filedDir == "" {
-				rendered, folderErr := naming.FolderFor(ctx, cx.DB, pageID)
-				if folderErr != nil {
-					return done, fmt.Errorf("page %d/%d destination: %w", n, total, folderErr)
+		if filed {
+			created++
+			// The destination is resolved once, off the first page: the pages
+			// of one archive belong in one folder, and a template carrying
+			// {id} or a clock would scatter them otherwise.
+			if naming.Folder != nil {
+				if filedDir == "" {
+					rendered, folderErr := naming.FolderFor(ctx, cx.DB, pageID)
+					if folderErr != nil {
+						return done, created, fmt.Errorf("page %d/%d destination: %w", n, total, folderErr)
+					}
+					filedDir = path.Join(rendered, sub)
 				}
-				filedDir = path.Join(rendered, sub)
-			}
-			if _, moveErr := gallery.PlaceImage(cx.DB, cx.GalleryPath, pageID, &filedDir, nil); moveErr != nil {
-				return done, fmt.Errorf("page %d/%d file: %w", n, total, moveErr)
+				if _, moveErr := gallery.PlaceImage(cx.DB, cx.GalleryPath, pageID, &filedDir, nil); moveErr != nil {
+					return done, created, fmt.Errorf("page %d/%d file: %w", n, total, moveErr)
+				}
 			}
 		}
 		// Archive page order becomes the collection position.
 		pos := n
 		if err := gallery.AddCollectionMembership(cx.DB, pageID, name, &pos); err != nil {
-			return done, fmt.Errorf("page %d/%d membership: %w", n, total, err)
+			return done, created, fmt.Errorf("page %d/%d membership: %w", n, total, err)
 		}
 		done = n
 		s.jobs.Update(done, total, "generating…")
 	}
 	cx.InvalidateCaches()
-	return done, nil
+	return done, created, nil
 }
 
 // generateCollectionCBZ serves POST /collections/generate-cbz: the
@@ -241,9 +249,7 @@ func collectionCBZFilename(name string) string {
 
 // shortHash returns the first 8 hex chars of a sha256 (or all of it);
 // used to build unique folder names for generated content.
-func shortHash(hash string) string {
-	return hash[:min(8, len(hash))]
-}
+func shortHash(hash string) string { return hash[:min(8, len(hash))] }
 
 // maxCBZStemBytes leaves room under the usual 255-byte filename limit
 // for the timestamp prefix, the ".cbz" suffix and a collision counter.

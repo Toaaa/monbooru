@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/monbooru/monbooru/internal/api"
 	"github.com/monbooru/monbooru/internal/config"
 	"github.com/monbooru/monbooru/internal/logx"
 )
@@ -171,10 +172,16 @@ func (ps *pairStore) remove(id string) {
 	delete(ps.m, id)
 }
 
-func writePairJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+// pairCORS runs the API's origin policy over a pairing response, answering
+// the refusal itself. These routes sit outside the api package's auth wrapper
+// because the operator's approval is the gate, so they would otherwise be the
+// only /api/v1/ addresses a browser cannot read the answer from.
+func (s *Server) pairCORS(w http.ResponseWriter, r *http.Request) bool {
+	if api.SetCORS(w, r, s.cfgSnapshot()) {
+		return true
+	}
+	api.WriteJSON(w, http.StatusForbidden, map[string]string{"code": "forbidden", "error": "CORS: origin not allowed"})
+	return false
 }
 
 // pairedWith reports whether a token issued to the given peer already exists.
@@ -188,6 +195,9 @@ func (s *Server) pairedWith(app string) bool {
 // operator approves it in Settings, after which the peer claims the token via
 // pairStatus.
 func (s *Server) pairRequest(w http.ResponseWriter, r *http.Request) {
+	if !s.pairCORS(w, r) {
+		return
+	}
 	var body struct {
 		App             string                `json:"app"`
 		URL             string                `json:"url"`
@@ -197,11 +207,11 @@ func (s *Server) pairRequest(w http.ResponseWriter, r *http.Request) {
 		Buttons         []config.PluginButton `json:"buttons"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.App == "" {
-		writePairJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_request", "error": "app and a JSON body are required"})
+		api.WriteJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_request", "error": "app and a JSON body are required"})
 		return
 	}
 	if err := validatePairOffer(body.App, body.Version, body.Buttons); err != nil {
-		writePairJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_request", "error": err.Error()})
+		api.WriteJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_request", "error": err.Error()})
 		return
 	}
 	// An offer from a peer already paired here is a re-pair, not a conflict:
@@ -215,11 +225,11 @@ func (s *Server) pairRequest(w http.ResponseWriter, r *http.Request) {
 		PeerToken: body.PeerToken, Version: body.Version, Buttons: body.Buttons, Repair: repair,
 	})
 	if !ok {
-		writePairJSON(w, http.StatusTooManyRequests, map[string]string{"code": "too_many_requests", "error": "too many pending pairing requests"})
+		api.WriteJSON(w, http.StatusTooManyRequests, map[string]string{"code": "too_many_requests", "error": "too many pending pairing requests"})
 		return
 	}
 	logx.Infof("pairing: request from %s (%s)", body.App, body.URL)
-	writePairJSON(w, http.StatusOK, map[string]string{"request_id": id, "status": "pending"})
+	api.WriteJSON(w, http.StatusOK, map[string]string{"request_id": id, "status": "pending"})
 }
 
 // validatePairOffer refuses an offer monbooru could not persist or render.
@@ -238,35 +248,41 @@ func validatePairOffer(app, version string, buttons []config.PluginButton) error
 // mints the peer's token, stores the reverse credentials, and returns the
 // secret once.
 func (s *Server) pairStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.pairCORS(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	req, ok := s.pairs.get(id)
 	if !ok {
-		writePairJSON(w, http.StatusNotFound, map[string]string{"code": "not_found", "error": "unknown pairing request"})
+		api.WriteJSON(w, http.StatusNotFound, map[string]string{"code": "not_found", "error": "unknown pairing request"})
 		return
 	}
 	if req.State != pairApproved {
-		writePairJSON(w, http.StatusOK, map[string]string{"status": string(req.State)})
+		api.WriteJSON(w, http.StatusOK, map[string]string{"status": string(req.State)})
 		return
 	}
 	claimed, won := s.pairs.claim(id)
 	if !won {
-		writePairJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+		api.WriteJSON(w, http.StatusOK, map[string]string{"status": "approved"})
 		return
 	}
 	secret, err := s.mintPairedToken(claimed)
 	if err != nil {
 		s.pairs.unclaim(id)
-		writePairJSON(w, http.StatusInternalServerError, map[string]string{"code": "mint_failed", "error": err.Error()})
+		api.WriteJSON(w, http.StatusInternalServerError, map[string]string{"code": "mint_failed", "error": err.Error()})
 		return
 	}
 	s.pairs.remove(id)
-	writePairJSON(w, http.StatusOK, map[string]string{"status": "approved", "token": secret})
+	api.WriteJSON(w, http.StatusOK, map[string]string{"status": "approved", "token": secret})
 }
 
 // pairTeardown lets a paired peer drop the pairing on this side too, so one
 // "remove pairing" tears down both ends. It removes only locally and never
 // calls back, which would loop.
 func (s *Server) pairTeardown(w http.ResponseWriter, r *http.Request) {
+	if !s.pairCORS(w, r) {
+		return
+	}
 	secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	s.cfgMu.RLock()
 	tok := s.cfg.FindTokenByHash(config.HashToken(secret))
@@ -276,15 +292,15 @@ func (s *Server) pairTeardown(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cfgMu.RUnlock()
 	if secret == "" || paired == "" {
-		writePairJSON(w, http.StatusUnauthorized, map[string]string{"code": "unauthorized", "error": "pairing token required"})
+		api.WriteJSON(w, http.StatusUnauthorized, map[string]string{"code": "unauthorized", "error": "pairing token required"})
 		return
 	}
 	if err := s.removePairing(paired); err != nil {
-		writePairJSON(w, http.StatusInternalServerError, map[string]string{"code": "remove_failed", "error": err.Error()})
+		api.WriteJSON(w, http.StatusInternalServerError, map[string]string{"code": "remove_failed", "error": err.Error()})
 		return
 	}
 	logx.Infof("pairing: %s removed the pairing remotely", paired)
-	writePairJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	api.WriteJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
 
 // peerCallbackURL rewrites the address a peer advertised so its host is the

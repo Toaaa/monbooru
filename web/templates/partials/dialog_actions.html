@@ -1,0 +1,6 @@
+{{define "dialog_actions" -}}
+<div class="dialog-actions">
+  <button type="submit"{{with .Class}} class="{{.}}"{{end}}>{{.Submit}}</button>
+  <button type="button" onclick="document.getElementById('{{.ID}}').close()">Cancel</button>
+</div>
+{{- end}}

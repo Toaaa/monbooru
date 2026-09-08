@@ -62,5 +62,5 @@ flatpak-builder --user --disable-rofiles-fuse --force-clean --repo=repo \
   build-dir "packaging/flatpak/$app.yml"
 
 flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
-  repo "dist/monbooru_${VERSION#v}_desktop_bundled_x86_64.flatpak" "$app"
+  repo "dist/monbooru_${VERSION#v}_x86_64.flatpak" "$app"
 ls -la dist

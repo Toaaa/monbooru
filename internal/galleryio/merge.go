@@ -76,7 +76,7 @@ func ExportGalleryLight(cx gallery.Handle, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := writeLightManifest(cx, inner); err != nil {
+	if err := ExportGalleryLightManifest(cx, inner); err != nil {
 		return err
 	}
 
@@ -89,19 +89,11 @@ func ExportGalleryLight(cx gallery.Handle, w io.Writer) error {
 	return zw.Close()
 }
 
-// ExportGalleryLightManifest streams the same tags.json document as
-// ExportGalleryLight but without the surrounding zip and without the gallery
-// files. Used by the export handler when the user picks the light format
-// without "Include image files".
-func ExportGalleryLightManifest(cx gallery.Handle, w io.Writer) error {
-	return writeLightManifest(cx, w)
-}
-
-// writeLightManifest streams the tags.json document using the existing
+// ExportGalleryLightManifest streams the tags.json document using the existing
 // jsonWriter. One image-ordered join carries the tags, so the cursor
 // groups as it advances and neither the image list nor a per-image
 // query round trip is paid.
-func writeLightManifest(cx gallery.Handle, w io.Writer) error {
+func ExportGalleryLightManifest(cx gallery.Handle, w io.Writer) error {
 	bw := newJSONWriter(w)
 	bw.objStart()
 	bw.field("version", LightManifestVersion)
@@ -410,7 +402,7 @@ type MergeResult struct {
 }
 
 // MergeGallery additively brings images and tags from the uploaded file into
-// the named gallery. Unlike ImportGallery it does not wipe anything and is
+// the named gallery. Unlike importGallery it does not wipe anything and is
 // permitted on the active and default galleries. db and json uploads apply
 // tags to existing images matched by SHA; zip uploads (full or light) also
 // ingest new images when the archive carries their files.

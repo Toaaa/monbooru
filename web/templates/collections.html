@@ -3,17 +3,11 @@
 {{$prefix := .Prefix}}
 {{$sort := .Sort}}
 <div id="sidebar-inner">
-  <!-- Boosted filter links swap #collections-page in place and refresh
-       this sidebar out-of-band so active states track the pushed URL
-       without a full reload, mirroring the tags page. -->
   <div class="sidebar-section"
        hx-boost="true" hx-target="#collections-page" hx-select="#collections-page" hx-swap="outerHTML"
        hx-select-oob="#sidebar-inner" hx-push-url="true">
     <h3>Filter</h3>
     <form action="/collections" method="get" class="tags-filter-row">
-      <!-- No sidebar OOB refresh here (the wrapper's hx-select-oob is
-           inherited without the unset): swapping the input would drop
-           focus and eat the letters typed since the request. -->
       <input type="text" name="q" id="collections-q-input" value="{{$prefix}}" placeholder="Search…"
              hx-get="/collections"
              hx-trigger="input changed delay:300ms"
@@ -91,10 +85,7 @@
       {{template "suggest_input" dict "Name" "name" "InputID" "collection-rename-input" "Endpoint" "/internal/collection/suggest" "SuggestID" "collection-rename-suggest" "Required" true}}
     </div>
     <div id="collection-rename-error"></div>
-    <div class="dialog-actions">
-      <button type="submit">Rename</button>
-      <button type="button" onclick="document.getElementById('collection-rename-dialog').close()">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "collection-rename-dialog" "Submit" "Rename"}}
   </form>
 </dialog>
 
@@ -155,17 +146,19 @@ function captureOrigOrder() {
 
 // applyOrderMode reflows the tiles for the current mode - filename mode sorts
 // them by filename (natural), order mode restores the server's reading order -
-// then flips the toggle's active button and the mode-specific intro line. The
+// then flips the toggle's active button and the mode-specific lines. The
 // mode only arranges the grid; it assigns no order on its own (that is a click,
 // or Save while in filename mode).
 function applyOrderMode() {
   document.querySelectorAll('#collection-order-body [data-order-mode]').forEach(function(b) {
     b.classList.toggle('active', b.dataset.orderMode === _orderMode);
   });
-  var oi = document.querySelector('#collection-order-body .order-mode-order');
-  var fi = document.querySelector('#collection-order-body .order-mode-filename');
-  if (oi) oi.hidden = _orderMode !== 'order';
-  if (fi) fi.hidden = _orderMode !== 'filename';
+  document.querySelectorAll('#collection-order-body .order-mode-order').forEach(function(el) {
+    el.hidden = _orderMode !== 'order';
+  });
+  document.querySelectorAll('#collection-order-body .order-mode-filename').forEach(function(el) {
+    el.hidden = _orderMode !== 'filename';
+  });
   var grid = document.querySelector('#collection-order-body .collection-order-grid');
   if (grid) {
     grid.classList.toggle('filename-preview', _orderMode === 'filename');
@@ -244,7 +237,7 @@ function startTileRename(span) {
     var body = new URLSearchParams();
     body.set('name', name);
     body.set('inline', '1');
-    fetch('/images/' + tile.dataset.id + '/rename', {
+    fetch('/images/' + tile.dataset.id + '/place', {
       method: 'POST',
       headers: {'X-CSRF-Token': getCSRFToken(), 'Content-Type': 'application/x-www-form-urlencoded'},
       body: body

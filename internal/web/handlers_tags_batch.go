@@ -209,7 +209,7 @@ func (s *Server) runBatchTagCategory(ids []int64, catID int64, merge bool) {
 		return true, nil
 	})
 
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	summary := fmt.Sprintf("moved %d tag(s)", changed-mergedCount)
 	if mergedCount > 0 {
 		summary += fmt.Sprintf(", merged %d", mergedCount)
@@ -246,7 +246,7 @@ func (s *Server) runBatchTagAlias(ids []int64, canonID int64) {
 		return true, nil
 	})
 
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	summary := skippedSuffix(fmt.Sprintf("aliased %d tag(s)", aliased), skipped)
 	s.finishTagScopeJob(aliased, reasons, cancelled, "alias", summary)
 }
@@ -268,7 +268,7 @@ func (s *Server) runMergeFolded(ids []int64) {
 		s.jobs.Fail(err.Error())
 		return
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	var reasons skipReasons
 	for _, e := range res.Refused {
 		reasons.add(e)
@@ -340,7 +340,7 @@ func (s *Server) runBatchTagImply(ids []int64, targetID int64, remove bool) {
 	if err := s.tagSvc().RecalcIDs([]int64{targetID}); err != nil {
 		logx.Warnf("batch imply recalc: %v", err)
 	}
-	s.Active().InvalidateCaches()
+	s.active().InvalidateCaches()
 	noun := "declared"
 	if remove {
 		noun = "removed"

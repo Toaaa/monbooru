@@ -30,17 +30,16 @@ func (s *Server) loginPageData(extra map[string]any) map[string]any {
 
 // standalonePageData is what a page rendered outside layout.html needs to
 // look like the rest of the install: the fields partials/head.html reads.
-// These pages do not run through s.base(), so the brand name, the favicon,
-// the theme and the custom stylesheet have to be threaded explicitly -
-// otherwise the configured branding covers every page except the ones an
-// operator meets first and last.
+// These pages do not run through s.base(), so the brand name, the favicon
+// and the theme have to be threaded explicitly - otherwise the configured
+// branding covers every page except the ones an operator meets first and
+// last.
 func (s *Server) standalonePageData(title string, extra map[string]any) map[string]any {
 	data := map[string]any{
 		"Title":        title,
 		"CSRFToken":    s.csrfToken("anon"),
 		"BooruName":    s.booruName(),
 		"BooruFavicon": s.booruFaviconURL(),
-		"CustomCSS":    s.customCSSPath() != "",
 		"Theme":        s.activeTheme().Path != "",
 	}
 	for k, v := range extra {

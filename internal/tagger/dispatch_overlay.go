@@ -10,28 +10,16 @@ import (
 	"github.com/monbooru/monbooru/internal/fsx"
 )
 
-// EmbeddedDispatchRules returns the shipped default rules for one
-// tagger, in file order. Empty for taggers without an embedded table.
-func EmbeddedDispatchRules(taggerName string) []DispatchEntry {
-	return parseEmbeddedDispatch(taggerName)
-}
-
-// OverlayDispatchRules returns the rules of the tagger's on-disk
-// overlay, in file order. Empty when no overlay exists.
-func OverlayDispatchRules(modelPath, taggerName string) []DispatchEntry {
-	return parseOverlayDispatch(modelPath, taggerName)
-}
-
 // MergedDispatchRules returns the embedded defaults with the overlay
 // applied - same-source entries replaced, new sources appended -
 // source-sorted. This is the effective table the export view shows and
 // the file shape a dispatch_default PR replaces.
 func MergedDispatchRules(modelPath, taggerName string) []DispatchEntry {
 	merged := map[string]DispatchEntry{}
-	for _, e := range parseEmbeddedDispatch(taggerName) {
+	for _, e := range EmbeddedDispatchRules(taggerName) {
 		merged[e.Source] = e
 	}
-	for _, e := range parseOverlayDispatch(modelPath, taggerName) {
+	for _, e := range OverlayDispatchRules(modelPath, taggerName) {
 		merged[e.Source] = e
 	}
 	out := make([]DispatchEntry, 0, len(merged))
@@ -63,7 +51,7 @@ func UpdateDispatchOverlay(modelPath, taggerName string, mutate func(map[string]
 	overlayMu.Lock()
 	defer overlayMu.Unlock()
 	overlay := map[string]DispatchEntry{}
-	for _, e := range parseOverlayDispatch(modelPath, taggerName) {
+	for _, e := range OverlayDispatchRules(modelPath, taggerName) {
 		overlay[e.Source] = e
 	}
 	if err := mutate(overlay); err != nil {
@@ -85,7 +73,7 @@ func UpdateDispatchOverlay(modelPath, taggerName string, mutate func(map[string]
 // a crash can't leave a half-written table for the next Run to skip.
 func SaveDispatchOverlay(modelPath, taggerName string, rules []DispatchEntry) error {
 	embedded := map[string]DispatchEntry{}
-	for _, e := range parseEmbeddedDispatch(taggerName) {
+	for _, e := range EmbeddedDispatchRules(taggerName) {
 		embedded[e.Source] = e
 	}
 	kept := make([]DispatchEntry, 0, len(rules))

@@ -12,13 +12,13 @@ import (
 // mean "no relation of that kind"; the templates hide their section
 // when the field is empty.
 type ImageRelations struct {
-	DupGroup         *DupGroupSummary
-	AltGroupID       *int64
-	AltGroupMembers  []int64
-	VersionParent    *int64
-	VersionChild     *int64
-	DerivativeSource *int64
-	Derivatives      []int64
+	DupGroup          *DupGroupSummary
+	AltGroupID        *int64
+	AltGroupMembers   []int64
+	VersionParent     *int64
+	VersionChild      *int64
+	DerivativeSources []int64
+	Derivatives       []int64
 }
 
 // DupGroupSummary names a duplicate group plus the canonical original
@@ -45,7 +45,7 @@ func (r *ImageRelations) HasAny() bool {
 	if r.VersionParent != nil || r.VersionChild != nil {
 		return true
 	}
-	if r.DerivativeSource != nil || len(r.Derivatives) > 0 {
+	if len(r.DerivativeSources) > 0 || len(r.Derivatives) > 0 {
 		return true
 	}
 	return false
@@ -72,12 +72,24 @@ func CommonDerivativeAncestor(database *db.DB, a, b int64) (int64, bool, error) 
 	return 0, false, nil
 }
 
-// derivativeAncestors walks the source chain above imageID, nearest
-// first. Each derivative has exactly one source (PK on
-// derivative_image_id), so every step is a point seek. Depth-capped
-// like the service's chain walks.
+// derivativeAncestors collects every image above imageID, nearest
+// first: the walk is breadth-first, so a source two edges up never
+// precedes one directly above. Depth-capped like the service's walks.
 func derivativeAncestors(database *db.DB, imageID int64) ([]int64, error) {
-	return ChainPath(database.Read, "derivative_edges", "source_image_id", "derivative_image_id", imageID)
+	above, _, err := chainSpan(database.Read, "derivative_edges", "source_image_id", "derivative_image_id", imageID)
+	if err != nil {
+		return nil, err
+	}
+	return above[1:], nil
+}
+
+// HasDerivativeSource reports whether imageID already names a source.
+func HasDerivativeSource(database *db.DB, imageID int64) (bool, error) {
+	var has int
+	err := database.Read.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM derivative_edges WHERE derivative_image_id = ?)`, imageID,
+	).Scan(&has)
+	return has != 0, err
 }
 
 // LoadImageRelations gathers every relation the image participates in.
@@ -86,7 +98,6 @@ func derivativeAncestors(database *db.DB, imageID int64) ([]int64, error) {
 func LoadImageRelations(database *db.DB, imageID int64) (*ImageRelations, error) {
 	out := &ImageRelations{}
 
-	// Duplicate group.
 	var dupGroupID sql.NullInt64
 	if err := database.Read.QueryRow(
 		`SELECT group_id FROM dup_group_members WHERE image_id = ?`, imageID,
@@ -111,7 +122,6 @@ func LoadImageRelations(database *db.DB, imageID int64) (*ImageRelations, error)
 		out.DupGroup = &dg
 	}
 
-	// Alternate group.
 	var altGroupID sql.NullInt64
 	if err := database.Read.QueryRow(
 		`SELECT group_id FROM alt_group_members WHERE image_id = ?`, imageID,
@@ -130,7 +140,6 @@ func LoadImageRelations(database *db.DB, imageID int64) (*ImageRelations, error)
 		out.AltGroupMembers = members
 	}
 
-	// Version edges.
 	var parentID sql.NullInt64
 	if err := database.Read.QueryRow(
 		`SELECT parent_image_id FROM version_edges WHERE child_image_id = ?`, imageID,
@@ -150,16 +159,13 @@ func LoadImageRelations(database *db.DB, imageID int64) (*ImageRelations, error)
 		out.VersionChild = &childID.Int64
 	}
 
-	// Derivative edges.
-	var sourceID sql.NullInt64
-	if err := database.Read.QueryRow(
-		`SELECT source_image_id FROM derivative_edges WHERE derivative_image_id = ?`, imageID,
-	).Scan(&sourceID); err != nil && err != sql.ErrNoRows {
+	sources, err := db.QueryIDs(database.Read,
+		`SELECT source_image_id FROM derivative_edges WHERE derivative_image_id = ? ORDER BY source_image_id`, imageID,
+	)
+	if err != nil {
 		return nil, err
 	}
-	if sourceID.Valid {
-		out.DerivativeSource = &sourceID.Int64
-	}
+	out.DerivativeSources = sources
 	derivatives, err := db.QueryIDs(database.Read,
 		`SELECT derivative_image_id FROM derivative_edges WHERE source_image_id = ? ORDER BY derivative_image_id`, imageID,
 	)

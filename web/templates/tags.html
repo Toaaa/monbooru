@@ -13,19 +13,11 @@
 {{$folded := ""}}{{if .Folded}}{{$folded = "1"}}{{end}}
 {{$zero := "0"}}{{if .ZeroOnly}}{{$zero = "only"}}{{else if .ShowZero}}{{$zero = "1"}}{{end}}
 <div id="sidebar-inner">
-  <!-- Boosted filter links swap #tags-page in place and refresh this
-       sidebar out-of-band so active states and link hrefs track the
-       pushed URL without a full reload. -->
   <div class="sidebar-section"
        hx-boost="true" hx-target="#tags-page" hx-select="#tags-page" hx-swap="outerHTML"
        hx-select-oob="#sidebar-inner" hx-push-url="true">
     <h3>Filter</h3>
     <form action="/tags" method="get" class="tags-filter-row">
-      <!-- No sidebar OOB refresh here (the wrapper's hx-select-oob is
-           inherited without the unset): a slow render would swap this
-           input back to the request-time value and eat the letters
-           typed since. Only the table region follows the keystrokes;
-           boosted filter clicks still refresh the sidebar. -->
       <input type="text" name="q" id="tags-q-input" value="{{$prefix}}" placeholder="Search tags…"
              hx-get="/tags"
              hx-trigger="input changed delay:300ms"
@@ -146,10 +138,6 @@
 
   <div id="tag-flash"></div>
 
-  <!-- Selection bar: appears when rows are checked. The selection is the
-       scope for every batch action; ticking the header checkbox offers
-       the whole-search escalation, which the endpoints resolve
-       server-side from the filter fields like delete-search always has. -->
   <div id="tag-batch-bar" data-total="{{.Total}}" hidden>
     <button type="button" id="btn-batch-select-all" class="btn-sm">Select all</button>
     <button type="button" id="btn-batch-clear" class="btn-sm">Cancel</button>
@@ -167,8 +155,6 @@
 
   <div class="table-scroll">
   <table class="tag-table">
-    <!-- Sortable headers: clicking sets the sort, clicking again flips
-         the direction. -->
     {{$nameOrder := "asc"}}{{if and (eq $sort "name") (eq $order "asc")}}{{$nameOrder = "desc"}}{{end}}
     {{$usageOrder := "desc"}}{{if and (eq $sort "usage") (eq $order "desc")}}{{$usageOrder = "asc"}}{{end}}
     {{$createdOrder := "desc"}}{{if and (eq $sort "created") (eq $order "desc")}}{{$createdOrder = "asc"}}{{end}}
@@ -195,7 +181,8 @@
       {{$tag := .}}
       <tr class="tag-row" id="tag-row-{{.ID}}">
         <td class="tag-select-col"><input type="checkbox" class="tag-select" value="{{.ID}}" data-name="{{.Name}}" data-color="{{catColor .CategoryColor}}" data-category="{{.CategoryName}}" aria-label="Select {{.Name}}"></td>
-        <td class="tag-name-cell{{if and (not .IsAlias) (eq .CategoryName "rating")}} tag-name-builtin{{end}}">
+        <td class="tag-name-cell{{if and (not .IsAlias) (eq .CategoryName "rating")}} tag-name-builtin{{end}}"
+            title="{{.Name}}{{if .IsAlias}} → {{.CanonicalName}}{{end}}">
           {{if .IsAlias}}
           <span style="color:{{catColor .CategoryColor}}">{{.Name}}</span>
           <span class="merge-arrow">→</span>
@@ -229,9 +216,9 @@
                   hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'
                   hx-on::after-request="onTagCategoryPatch(event, this)"
                   onchange="updateTagColor(this)">
-            {{range $cats}}
+            {{range $cats}}{{if ne .Name "rating"}}
             <option value="{{.ID}}" data-color="{{catColor .Color}}" {{if eq .ID $tag.CategoryID}}selected{{end}}>{{.Name}}</option>
-            {{end}}
+            {{end}}{{end}}
           </select>
           {{end}}
         </td>
@@ -283,19 +270,13 @@
 
 </div>
 
-<!-- Rename dialog -->
 {{template "partials/tag_rename_dialog.html" (dict "CSRFToken" .CSRFToken "KeepAlias" true)}}
 
-<!-- Batch change-category dialog -->
 <dialog id="batch-category-dialog">
   <p id="batch-category-scope"></p>
   <div class="field">
     <label>Target category</label>
-    <select id="batch-category-select">
-      {{range .Categories}}
-      <option value="{{.ID}}">{{.Name}}</option>
-      {{end}}
-    </select>
+    {{template "partials/category_select.html" dict "ID" "batch-category-select" "Categories" .Categories}}
   </div>
   <label style="display:block;font-size:12px">
     <input type="checkbox" id="batch-category-merge">
@@ -308,8 +289,6 @@
   </div>
 </dialog>
 
-<!-- Batch alias dialog. MergeTags per tag in scope; an alias row in
-     scope repoints. -->
 <dialog id="batch-alias-dialog">
   <p id="batch-alias-scope"></p>
   <div class="field">
@@ -325,8 +304,6 @@
   </div>
 </dialog>
 
-<!-- Batch merge dialog: batch-alias with one of the selected rows as
-     the canonical. Needs an explicit selection to enumerate choices. -->
 <dialog id="batch-merge-dialog">
   <p id="batch-merge-scope"></p>
   <p class="field-hint">Which tag do the others merge into?</p>
@@ -339,7 +316,6 @@
   </div>
 </dialog>
 
-<!-- Batch imply dialog: declare or remove "each tag in scope implies X". -->
 <dialog id="batch-imply-dialog">
   <p id="batch-imply-scope"></p>
   <div class="field">
@@ -359,7 +335,6 @@
   </div>
 </dialog>
 
-<!-- Create-tag dialog -->
 <dialog id="tag-create-dialog">
   <form hx-post="/tags/new"
         hx-target="#tag-create-error"
@@ -372,21 +347,13 @@
     </div>
     <div class="field">
       <label>Category</label>
-      <select name="category_id" id="tag-create-cat">
-        {{range .Categories}}
-        <option value="{{.ID}}">{{.Name}}</option>
-        {{end}}
-      </select>
+      {{template "partials/category_select.html" dict "ID" "tag-create-cat" "Name" "category_id" "Categories" .Categories}}
     </div>
     <div id="tag-create-error"></div>
-    <div class="dialog-actions">
-      <button type="submit">Create</button>
-      <button type="button" onclick="document.getElementById('tag-create-dialog').close()">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "tag-create-dialog" "Submit" "Create"}}
   </form>
 </dialog>
 
-<!-- Create-alias dialog -->
 <dialog id="alias-create-dialog">
   <form hx-post="/tags/aliases"
         hx-target="#alias-create-error"
@@ -399,40 +366,28 @@
     </div>
     <div class="field">
       <label>Alias category</label>
-      <select name="category_id" id="alias-create-cat">
-        {{range .Categories}}
-        <option value="{{.ID}}">{{.Name}}</option>
-        {{end}}
-      </select>
+      {{template "partials/category_select.html" dict "ID" "alias-create-cat" "Name" "category_id" "Categories" .Categories}}
     </div>
     <div class="field">
       <label>Resolves to (canonical tag)</label>
       {{template "tag_suggest_input" dict "Name" "canonical_id" "InputID" "alias-create-canon" "SuggestID" "alias-create-suggest" "Required" true}}
     </div>
     <div id="alias-create-error"></div>
-    <div class="dialog-actions">
-      <button type="submit">Create</button>
-      <button type="button" onclick="document.getElementById('alias-create-dialog').close()">Cancel</button>
-    </div>
+    {{template "dialog_actions" dict "ID" "alias-create-dialog" "Submit" "Create"}}
   </form>
 </dialog>
 
-<!-- Batch delete dialog. The scope line is set at open time from the
-     live selection (or the whole-search escalation). The count excludes
-     built-in rating rows, which DeleteTag treats as a usage-strip
-     rather than a catalog delete. -->
 <dialog id="delete-tags-search-dialog">
   <p id="delete-tags-scope-line"></p>
   <p style="color:var(--error);font-size:12px">Tags are removed from every image they touch. This cannot be undone. Built-in rating tags are usage-stripped (the catalog row stays).</p>
   <div id="delete-tags-search-flash"></div>
   <div class="dialog-actions">
     <button type="button" class="btn-danger" onclick="confirmDeleteTagsSearch()">Delete</button>
-    <button type="button" onclick="document.getElementById('delete-tags-search-dialog').close()">Cancel</button>
+    <button type="button" autofocus onclick="document.getElementById('delete-tags-search-dialog').close()">Cancel</button>
   </div>
 </dialog>
 
 {{if .MonloaderPTRPresent}}
-<!-- Batch PTR lookup dialog, same scope resolution as the delete. -->
 <dialog id="ptr-lookup-search-dialog">
   <p id="ptr-lookup-scope-line"></p>
   <p style="color:var(--fg-dim);font-size:12px">Aliases and implications the Public Tag Repository declares are added to the catalog.</p>
@@ -517,6 +472,9 @@ function handleTagSelectClick(box, e) {
     var pageBox = document.getElementById('tag-select-page');
     if (pageBox) pageBox.checked = false;
   }
+  // Focus off the box so the keydown router's input guard doesn't swallow
+  // the page's shortcuts on the next press.
+  box.blur();
   updateTagBatchBar();
 }
 
@@ -529,99 +487,83 @@ function clearTagSelection() {
   updateTagBatchBar();
 }
 
-document.addEventListener('click', function(e) {
-  if (!e.target.closest) return;
-  var el = e.target.closest('.btn-rename-trigger');
-  if (el) { openRenameDialog(el); return; }
-  el = e.target.closest('.btn-delete-tag');
-  if (el) { confirmDeleteTag(el); return; }
-  el = e.target.closest('.tag-select');
-  if (el) { handleTagSelectClick(el, e); return; }
-  el = e.target.closest('#tag-select-all-matching');
-  if (el) {
+// The page's click router. Declaration order is match order, so the class
+// entries stay ahead of the id ones.
+var tagClickRoutes = [
+  ['.btn-rename-trigger', function(el) { openRenameDialog(el); }],
+  ['.btn-delete-tag', function(el) { confirmDeleteTag(el); }],
+  ['.tag-select', function(el, e) { handleTagSelectClick(el, e); }],
+  ['#tag-select-all-matching', function(el, e) {
     e.preventDefault();
     tagSelectAllMatching = true;
     updateTagBatchBar();
-    return;
-  }
-  el = e.target.closest('#btn-batch-select-all');
-  if (el) {
+  }],
+  ['#btn-batch-select-all', function() {
     tagSelectAllMatching = false;
     var pageBox = document.getElementById('tag-select-page');
     if (pageBox) pageBox.checked = true;
     document.querySelectorAll('.tag-select').forEach(function(b) { b.checked = true; });
     updateTagBatchBar();
-    return;
-  }
-  el = e.target.closest('#btn-batch-clear');
-  if (el) { clearTagSelection(); return; }
-  el = e.target.closest('#btn-batch-category');
-  if (el) {
+  }],
+  ['#btn-batch-clear', function() { clearTagSelection(); }],
+  ['#btn-batch-category', function() {
     clearSlots('batch-category-flash');
     document.getElementById('batch-category-scope').textContent = 'Move ' + tagScopeLabel() + ' to:';
     document.getElementById('batch-category-dialog').showModal();
-    return;
-  }
-  el = e.target.closest('#btn-batch-merge');
-  if (el) { openBatchMerge(); return; }
-  el = e.target.closest('#btn-batch-alias');
-  if (el) {
+  }],
+  ['#btn-batch-merge', function() { openBatchMerge(); }],
+  ['#btn-batch-alias', function() {
     clearSlots('batch-alias-flash', 'batch-alias-suggest');
     document.getElementById('batch-alias-canon').value = '';
     document.getElementById('batch-alias-scope').textContent = 'Alias ' + tagScopeLabel() + ' to:';
     document.getElementById('batch-alias-dialog').showModal();
     document.getElementById('batch-alias-canon').focus();
-    return;
-  }
-  el = e.target.closest('#btn-batch-imply');
-  if (el) {
+  }],
+  ['#btn-batch-imply', function() {
     clearSlots('batch-imply-flash', 'batch-imply-suggest');
     document.getElementById('batch-imply-target').value = '';
     document.getElementById('batch-imply-scope').textContent = 'Each of ' + tagScopeLabel() + ' will imply:';
     document.getElementById('batch-imply-dialog').showModal();
     document.getElementById('batch-imply-target').focus();
-    return;
-  }
-  el = e.target.closest('#btn-batch-delete');
-  if (el) {
+  }],
+  ['#btn-batch-delete', function() {
     clearSlots('delete-tags-search-flash');
     document.getElementById('delete-tags-scope-line').textContent = 'Delete ' + tagScopeLabel() + '?';
     document.getElementById('delete-tags-search-dialog').showModal();
-    return;
-  }
-  el = e.target.closest('#btn-batch-ptr');
-  if (el) {
+  }],
+  ['#btn-batch-ptr', function() {
     clearSlots('ptr-lookup-search-flash');
     document.getElementById('ptr-lookup-scope-line').textContent = 'Find aliases and implications for ' + tagScopeLabel() + '?';
     document.getElementById('ptr-lookup-search-dialog').showModal();
-    return;
-  }
-  el = e.target.closest('#btn-batch-merge-folded');
-  if (el) {
+  }],
+  ['#btn-batch-merge-folded', function() {
     postForm('/tags/merge-folded', tagScopeParams(), {
       flashId: 'tag-flash',
       failMsg: 'Merge failed.',
       catchMsg: 'Merge request failed.',
       onOK: tagBatchDone
     });
-    return;
-  }
-  el = e.target.closest('#btn-create-alias');
-  if (el) {
+  }],
+  ['#btn-create-alias', function() {
     document.getElementById('alias-create-name').value = '';
     document.getElementById('alias-create-canon').value = '';
     clearSlots('alias-create-error', 'alias-create-suggest');
     document.getElementById('alias-create-dialog').showModal();
     document.getElementById('alias-create-name').focus();
-    return;
-  }
-  el = e.target.closest('#btn-create-tag');
-  if (el) {
+  }],
+  ['#btn-create-tag', function() {
     document.getElementById('tag-create-name').value = '';
     clearSlots('tag-create-error');
     document.getElementById('tag-create-dialog').showModal();
     document.getElementById('tag-create-name').focus();
-    return;
+  }]
+];
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest) return;
+  for (var i = 0; i < tagClickRoutes.length; i++) {
+    var el = e.target.closest(tagClickRoutes[i][0]);
+    if (el) { tagClickRoutes[i][1](el, e); return; }
   }
   // While a selection is active, a plain click on a row's background
   // toggles it, like the gallery's batch-mode thumbnails. Shift keeps
@@ -642,6 +584,7 @@ document.addEventListener('change', function(e) {
   if (e.target && e.target.id === 'tag-select-page') {
     tagSelectAllMatching = false;
     document.querySelectorAll('.tag-select').forEach(function(b) { b.checked = e.target.checked; });
+    e.target.blur();
     updateTagBatchBar();
   }
 });

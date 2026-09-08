@@ -248,8 +248,11 @@ func (w *Watcher) jobSuppressesIngest() bool {
 	if st == nil || !st.Running {
 		return false
 	}
+	// prune-dirs is here for a different reason: every directory it unlinks
+	// fires a Remove the watcher would otherwise chase to a row that never
+	// existed.
 	switch st.JobType {
-	case "sync", "move", "transfer", "delete", "tag":
+	case "sync", "move", "transfer", "delete", "tag", "prune-dirs":
 		return true
 	}
 	return false

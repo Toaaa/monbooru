@@ -219,7 +219,7 @@ func (s *Server) extractMangaPage(w http.ResponseWriter, r *http.Request) {
 		logx.Warnf("extract page %d of image %d: %s: %v", n, img.ID, stage, err)
 		http.Error(w, "Could not extract this page.", http.StatusInternalServerError)
 	}
-	cx := s.Active()
+	cx := s.active()
 	if cx == nil {
 		fail("gallery", fmt.Errorf("no active gallery"))
 		return

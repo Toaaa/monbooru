@@ -5,11 +5,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # CGO_ENABLED=1 is required for the tagger build tag: the onnxruntime_go bindings use cgo.
-RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
-    REPO=$(cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]') && \
-    DOC=$(cat DOC.md 2>/dev/null | tr -d '[:space:]') && \
+RUN . ./packaging/release-env.sh && \
     CGO_ENABLED=1 go build -tags tagger \
-    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Package=docker'" \
+    -ldflags="-s -w $LDFLAGS -X '$MOD.Package=docker'" \
     -o /monbooru ./cmd/monbooru
 
 # Stage 2: fetch runtime assets.
@@ -41,6 +39,9 @@ RUN ARCH=$(dpkg --print-architecture) && \
     tar -xzf /tmp/ort.tgz -C /tmp && \
     mkdir -p /opt/ort && \
     cp /tmp/onnxruntime-linux-${ONNX_ARCH}-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION} /opt/ort/libonnxruntime.so && \
+    mkdir -p /opt/licenses/onnxruntime && \
+    cp /tmp/onnxruntime-linux-${ONNX_ARCH}-${ORT_VERSION}/LICENSE \
+       /tmp/onnxruntime-linux-${ONNX_ARCH}-${ORT_VERSION}/ThirdPartyNotices.txt /opt/licenses/onnxruntime/ && \
     rm -f /tmp/ort.tgz
 
 # ffmpeg + ffprobe: the project's trimmed fully-static builds.
@@ -56,9 +57,10 @@ RUN ARCH=$(dpkg --print-architecture) && \
     esac && \
     curl -fsSL "https://github.com/monbooru/ffmpeg-builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_NAME}-${FF_ARCH}.tar.xz" -o /tmp/ffmpeg.tar.xz && \
     echo "${FF_SHA}  /tmp/ffmpeg.tar.xz" | sha256sum -c - && \
-    mkdir -p /tmp/ff /opt/ffmpeg && \
+    mkdir -p /tmp/ff /opt/ffmpeg /opt/licenses/ffmpeg && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
-    cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /opt/ffmpeg/
+    cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /opt/ffmpeg/ && \
+    cp /tmp/ff/licenses/* /opt/licenses/ffmpeg/
 
 # Stage 3: runtime.
 FROM gcr.io/distroless/cc-debian13:nonroot
@@ -68,9 +70,11 @@ COPY --from=assets /idsrc/group  /etc/group
 COPY --from=assets --chown=1000:1000 /idsrc/home /home/monbooru
 COPY --from=assets /opt/ort/libonnxruntime.so       /usr/lib/libonnxruntime.so
 COPY --from=assets /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe /usr/local/bin/
+COPY --from=assets /opt/licenses                     /usr/share/doc/
 COPY --from=build  /monbooru                         /usr/local/bin/monbooru
 
 ENV MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
+ENV MONBOORU_CONTAINER=1
 ENV HOME=/home/monbooru
 
 EXPOSE 8455

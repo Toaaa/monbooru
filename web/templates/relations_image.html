@@ -36,13 +36,6 @@
       <li class="manga-page-cell">
         <a href="/images/{{.ID}}" class="manga-page-link{{if eq .ID $.Self}} relations-tree-current{{end}}" title="Image {{.ID}}{{if eq .ID $.Self}} (this image){{end}}">
           <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy" class="manga-page-thumb">
-          {{/* Render the operator-set series_order verbatim; the row
-               ordering (driven by loadCollectionSiblings's
-               `series_order IS NULL, series_order, id`) already mirrors
-               the `sort=collection` SQL, so cards display in the same
-               order the gallery would under that sort. Rows without a
-               series_order show the bare series label - the operator
-               can spot which images still need an order assigned. */}}
           <span class="manga-page-num">{{.Series}}{{if .Order}} #{{deref64 .Order}}{{end}}</span>
         </a>
         {{if eq .ID $.Self}}
@@ -143,31 +136,37 @@
   </section>
   {{end}}
 
-  {{if .DerivativeTreeRows}}
+  {{if .DerivativeGraph}}
+  {{$g := .DerivativeGraph}}
   <section class="relations-section">
-    <h3>Image based on {{if .Relations.DerivativeSource}}image {{deref64 .Relations.DerivativeSource}}{{else}}this image{{end}}</h3>
-    <div class="relations-card-tree">
-      {{range .DerivativeTreeRows}}
-      {{$row := .}}
-      {{$action := index $.DerivativeActions .ID}}
-      <div class="relations-tree-row" data-depth="{{.Depth}}">
-        {{if .Trunks}}
-        <div class="relations-tree-prefix" aria-hidden="true">
-          {{range $row.Trunks}}<span class="relations-tree-trunk" data-style="{{.}}"></span>{{end}}
+    <h3>Image based on {{if eq (len .Relations.DerivativeSources) 1}}image {{index .Relations.DerivativeSources 0}}{{else if .Relations.DerivativeSources}}{{len .Relations.DerivativeSources}} images{{else}}this image{{end}}</h3>
+    <div class="deriv-graph" style="--deriv-cols:{{$g.Cols}}">
+      {{range $r, $cells := $g.Rows}}
+      <div class="deriv-row">
+        {{range $cells}}
+        {{$action := index $.DerivativeActions .ID}}
+        <div class="deriv-cell">
+          <a href="/images/{{.ID}}" class="relations-card-thumb relations-page-thumb-cell{{if eq .ID $.Self}} relations-tree-current{{end}}" title="Image {{.ID}}{{if eq .ID $.Self}} (this image){{end}}">
+            <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy" class="relations-page-thumb-img">
+            <span class="relations-page-thumb-num">{{if eq .Row 0}}Source · #{{.ID}}{{else}}Derivative · #{{.ID}}{{end}}</span>
+          </a>
+          {{if eq $action "this"}}
+          <span class="relations-inline-label">^ This image</span>
+          {{else if eq $action "source"}}
+          {{template "partials/relation_unlink_form.html" (dict "CSRFToken" $.CSRFToken "Type" "derivative" "A" .ID "B" $.Image.ID "Label" (printf "[unlink source #%d]" .ID) "ExtraClass" "relations-inline-action" "Edge" (printf "%d-%d" .ID $.Image.ID))}}
+          {{else if eq $action "derivative"}}
+          {{template "partials/relation_unlink_form.html" (dict "CSRFToken" $.CSRFToken "Type" "derivative" "A" $.Image.ID "B" .ID "Label" (printf "[unlink derivative #%d]" .ID) "ExtraClass" "relations-inline-action" "Edge" (printf "%d-%d" $.Image.ID .ID))}}
+          {{end}}
         </div>
         {{end}}
-        <a href="/images/{{.ID}}" class="relations-card-thumb relations-page-thumb-cell{{if eq .ID $.Self}} relations-tree-current{{end}}" title="Image {{.ID}}{{if eq .ID $.Self}} (this image){{end}}">
-          <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy" class="relations-page-thumb-img">
-          <span class="relations-page-thumb-num">{{if eq .Depth 0}}Source · {{else}}Derivative · {{end}}#{{.ID}}</span>
-        </a>
-        {{if eq $action "this"}}
-        <span class="relations-inline-label">&lt;- This image</span>
-        {{else if eq $action "source"}}
-        {{template "partials/relation_unlink_form.html" (dict "CSRFToken" $.CSRFToken "Type" "derivative" "A" .ID "B" $.Image.ID "Label" (printf "[unlink source #%d]" .ID) "ExtraClass" "relations-inline-action")}}
-        {{else if eq $action "derivative"}}
-        {{template "partials/relation_unlink_form.html" (dict "CSRFToken" $.CSRFToken "Type" "derivative" "A" $.Image.ID "B" .ID "Label" (printf "[unlink derivative #%d]" .ID) "ExtraClass" "relations-inline-action")}}
-        {{end}}
       </div>
+      {{if lt $r (len $g.Bands)}}
+      <div class="deriv-band">
+        <svg viewBox="0 0 {{$g.Width}} {{$g.BandH}}" preserveAspectRatio="none" aria-hidden="true">
+          {{range index $g.Bands $r}}<line data-edge="{{.From}}-{{.To}}" x1="{{.X1}}" y1="0" x2="{{.X2}}" y2="{{$g.BandH}}"/>{{end}}
+        </svg>
+      </div>
+      {{end}}
       {{end}}
     </div>
   </section>

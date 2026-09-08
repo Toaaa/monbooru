@@ -71,7 +71,7 @@
         <p class="field-hint">The same file saved at more than one path on disk.</p>
         <div class="relations-header-row">
           <a class="btn-sm" href="/relations/duplicates/sha256">Review duplicate files</a>
-          {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/file-duplicates/remove" "Target" "#flash-relations" "Confirm" "Remove every non-canonical duplicate file and its bytes from disk? The canonical path stays." "ConfirmOK" "Remove all" "Label" "Delete all duplicate files" "All" true)}}
+          {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/file-duplicates/remove" "Target" "#flash-relations" "Confirm" "Remove every non-canonical duplicate file?" "ConfirmDanger" "Their bytes are removed from disk. The canonical path stays." "ConfirmOK" "Remove all" "Label" "Delete all duplicate files" "All" true)}}
         </div>
       </div>
       <div class="settings-sub">
@@ -79,7 +79,7 @@
         <p class="field-hint">Images you marked as duplicates of each other. <strong>{{.Counts.DupGroups}}</strong> group(s) declared via the Relations session or the detail-page panel.</p>
         <div class="relations-header-row">
           <a class="btn-sm" href="/relations/duplicates/marked">Review duplicate images</a>
-          {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/duplicates/marked/delete-all" "Target" "#flash-relations" "Confirm" "Delete every non-original member of every duplicate-image group? Files are removed from disk." "ConfirmOK" "Delete all" "Label" "Delete all duplicate images")}}
+          {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/duplicates/marked/delete-all" "Target" "#flash-relations" "Confirm" "Delete every non-original member of every duplicate-image group?" "ConfirmDanger" "Their files are removed from disk. This cannot be undone." "ConfirmOK" "Delete all" "Label" "Delete all duplicate images")}}
         </div>
       </div>
     </div>
